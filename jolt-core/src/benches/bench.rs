@@ -6,6 +6,10 @@ use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::commitment::hyperkzg::HyperKZG;
 use crate::poly::commitment::hyrax::HyraxScheme;
 use crate::poly::commitment::zeromorph::Zeromorph;
+use crate::poly::commitment::mock::MockCommitScheme;
+use crate::lasso::surge::{SurgePreprocessing, SurgeProof};
+use crate::jolt::instruction::xor::XORInstruction;
+use crate::utils::transcript::ProofTranscript;
 use ark_bn254::{Bn254, Fr, G1Projective};
 use serde::Serialize;
 
@@ -14,6 +18,7 @@ pub enum PCSType {
     Hyrax,
     Zeromorph,
     HyperKZG,
+    Mock,
 }
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
@@ -54,6 +59,13 @@ pub fn benchmarks(
             BenchType::Fibonacci => fibonacci::<Fr, HyperKZG<Bn254>>(),
             _ => panic!("BenchType does not have a mapping"),
         },
+        PCSType::Mock => match bench_type {
+            BenchType::Sha2 => sha2::<Fr, MockCommitScheme<Fr>>(),
+            BenchType::Sha3 => sha3::<Fr, MockCommitScheme<Fr>>(),
+            BenchType::Sha2Chain => sha2chain::<Fr, MockCommitScheme<Fr>>(),
+            BenchType::Fibonacci => fibonacci::<Fr, MockCommitScheme<Fr>>(),
+            _ => panic!("BenchType does not have a mapping"),
+        }
         _ => panic!("PCS Type does not have a mapping"),
     }
 }
@@ -102,44 +114,87 @@ where
     PCS: CommitmentScheme<Field = F>,
 {
     let mut tasks = Vec::new();
-    let mut program = host::Program::new(example_name);
-    program.set_input(input);
+    // let mut program = host::Program::new(example_name);
+    // program.set_input(input);
+
+    
 
     let task = move || {
-        let (bytecode, memory_init) = program.decode();
-        let (io_device, trace, circuit_flags) = program.trace();
+            
 
-        let preprocessing: crate::jolt::vm::JoltPreprocessing<F, PCS> =
-            RV32IJoltVM::preprocess(bytecode.clone(), memory_init, 1 << 20, 1 << 20, 1 << 22);
+            let preprocessing = SurgePreprocessing::preprocess();
 
-        let (jolt_proof, jolt_commitments) = <RV32IJoltVM as Jolt<_, PCS, C, M>>::prove(
-            io_device,
-            trace,
-            circuit_flags,
-            preprocessing.clone(),
-        );
 
-        println!("Proof sizing:");
-        serialize_and_print_size("jolt_commitments", &jolt_commitments);
-        serialize_and_print_size("jolt_proof", &jolt_proof);
-        serialize_and_print_size(" jolt_proof.r1cs", &jolt_proof.r1cs);
-        serialize_and_print_size(" jolt_proof.bytecode", &jolt_proof.bytecode);
-        serialize_and_print_size(
-            " jolt_proof.read_write_memory",
-            &jolt_proof.read_write_memory,
-        );
-        serialize_and_print_size(
-            " jolt_proof.instruction_lookups",
-            &jolt_proof.instruction_lookups,
-        );
-
-        let verification_result = RV32IJoltVM::verify(preprocessing, jolt_proof, jolt_commitments);
-        assert!(
-            verification_result.is_ok(),
-            "Verification failed with error: {:?}",
-            verification_result.err()
-        );
+            (0..100).for_each(|_| {
+                let ops = vec![
+                XORInstruction(12, 12),
+                XORInstruction(12, 82),
+                XORInstruction(12, 12),
+                XORInstruction(25, 12),
+                XORInstruction(512, 112),
+                XORInstruction(412, 282),
+                XORInstruction(212, 152),
+                XORInstruction(725, 912),
+                XORInstruction(512, 612),
+                XORInstruction(412, 282),
+                XORInstruction(512, 152),
+                XORInstruction(725, 912),
+            ];
+            const C: usize = 8;
+            const M: usize = 1 << 12;
+            let mut transcript = ProofTranscript::new(b"test_transcript");
+            
+            // let generators = PedersenGenerators::new(
+            //     SurgeProof::<Fr, HyraxScheme<G1Projective>, XORInstruction, C, M>::num_generators(128),
+            //     b"LassoV1",
+            // );
+            let proof = SurgeProof::<Fr, MockCommitScheme<Fr>, XORInstruction, C, M>::prove(
+                &preprocessing,
+                &(),
+                ops,
+                &mut transcript,
+            );
+    
+            let mut transcript = ProofTranscript::new(b"test_transcript");
+            SurgeProof::verify(&preprocessing, &(), proof, &mut transcript).expect("should work");
+        })
     };
+
+    // let task = move || {
+    //     let (bytecode, memory_init) = program.decode();
+    //     let (io_device, trace, circuit_flags) = program.trace();
+
+    //     let preprocessing: crate::jolt::vm::JoltPreprocessing<F, PCS> =
+    //         RV32IJoltVM::preprocess(bytecode.clone(), memory_init, 1 << 20, 1 << 20, 1 << 22);
+
+    //     let (jolt_proof, jolt_commitments) = <RV32IJoltVM as Jolt<_, PCS, C, M>>::prove(
+    //         io_device,
+    //         trace,
+    //         circuit_flags,
+    //         preprocessing.clone(),
+    //     );
+
+    //     println!("Proof sizing:");
+    //     // serialize_and_print_size("jolt_commitments", &jolt_commitments);
+    //     serialize_and_print_size("jolt_proof", &jolt_proof);
+    //     serialize_and_print_size(" jolt_proof.r1cs", &jolt_proof.r1cs);
+    //     serialize_and_print_size(" jolt_proof.bytecode", &jolt_proof.bytecode);
+    //     serialize_and_print_size(
+    //         " jolt_proof.read_write_memory",
+    //         &jolt_proof.read_write_memory,
+    //     );
+    //     serialize_and_print_size(
+    //         " jolt_proof.instruction_lookups",
+    //         &jolt_proof.instruction_lookups,
+    //     );
+
+    //     let verification_result = RV32IJoltVM::verify(preprocessing, jolt_proof, jolt_commitments);
+    //     assert!(
+    //         verification_result.is_ok(),
+    //         "Verification failed with error: {:?}",
+    //         verification_result.err()
+    //     );
+    // };
 
     tasks.push((
         tracing::info_span!("Example_E2E"),

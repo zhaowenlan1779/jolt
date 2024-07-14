@@ -1,9 +1,12 @@
-use crate::field::JoltField;
+use crate::field::{JoltField, OptimizedMul};
 use crate::lasso::memory_checking::NoPreprocessing;
 use crate::poly::commitment::commitment_scheme::BatchType;
+use crate::subprotocols::rational_sum::{
+    BatchedDenseRationalSum, BatchedRationalSum, BatchedRationalSumProof, Pair,
+};
+use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::AppendToTranscript;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
-use itertools::{izip, Itertools};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::marker::{PhantomData, Sync};
 
@@ -14,10 +17,9 @@ use crate::{
         dense_mlpoly::DensePolynomial,
         eq_poly::EqPolynomial,
         identity_poly::IdentityPolynomial,
-        structured_poly::{StructuredCommitment, StructuredOpeningProof, StructuredOpeningProof2},
+        structured_poly::{StructuredCommitment, StructuredOpeningProof},
     },
     subprotocols::sumcheck::SumcheckInstanceProof,
-    subprotocols::zerocheck::ZerocheckInstanceProof,
     utils::{errors::ProofVerifyError, math::Math, transcript::ProofTranscript},
 };
 
@@ -81,47 +83,6 @@ where
 {
     fn append_to_transcript(&self, label: &'static [u8], transcript: &mut ProofTranscript) {
         [&self.dim_commitment, &self.E_commitment, &self.m_commitment]
-            .iter()
-            .for_each(|commitments| {
-                commitments.iter().for_each(|commitment| {
-                    commitment.append_to_transcript(label, transcript);
-                })
-            });
-    }
-}
-
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
-pub struct SurgeCommitmentLogup<CS: CommitmentScheme> {
-    pub f_commitment: Vec<CS::Commitment>, // Size NUM_MEMORIES
-    pub g_commitment: Vec<CS::Commitment>, // Size NUM_MEMORIES
-}
-
-impl<F, PCS> StructuredCommitment<PCS> for SurgePolysLogup<F, PCS>
-where
-    F: JoltField,
-    PCS: CommitmentScheme<Field = F>,
-{
-    type Commitment = SurgeCommitmentLogup<PCS>;
-
-    #[tracing::instrument(skip_all, name = "SurgePolysLogup::commit")]
-    fn commit(&self, generators: &PCS::Setup) -> Self::Commitment {
-        let f_commitment = PCS::batch_commit_polys(&self.f, generators, BatchType::SurgeReadWrite);
-        let g_commitment = PCS::batch_commit_polys(&self.g, generators, BatchType::SurgeReadWrite);
-
-        Self::Commitment {
-            f_commitment,
-            g_commitment,
-        }
-    }
-}
-
-impl<F, PCS> AppendToTranscript for SurgeCommitmentLogup<PCS>
-where
-    F: JoltField,
-    PCS: CommitmentScheme<Field = F>,
-{
-    fn append_to_transcript(&self, label: &'static [u8], transcript: &mut ProofTranscript) {
-        [&self.f_commitment, &self.g_commitment]
             .iter()
             .for_each(|commitments| {
                 commitments.iter().for_each(|commitment| {
@@ -208,14 +169,13 @@ where
     Instruction: JoltInstruction + Default,
 {
     _marker: PhantomData<Instruction>,
-    f_openings: Vec<F>,
     m_openings: Vec<F>,
     sid: Option<F>,    // Computed by verifier
     t: Option<Vec<F>>, // Computed by verifier
 }
 
 impl<F, PCS, Instruction, const C: usize, const M: usize>
-    StructuredOpeningProof2<F, PCS, SurgePolysPrimary<F, PCS>, SurgePolysLogup<F, PCS>>
+    StructuredOpeningProof<F, PCS, SurgePolysPrimary<F, PCS>>
     for SurgeLogupFPolyOpenings<F, Instruction, C, M>
 where
     F: JoltField,
@@ -226,16 +186,11 @@ where
     type Preprocessing = SurgePreprocessing<F, Instruction, C, M>;
 
     #[tracing::instrument(skip_all, name = "SurgeLogupOpenings::open")]
-    fn open(
-        polynomials_primary: &SurgePolysPrimary<F, PCS>,
-        polynomials_logup: &SurgePolysLogup<F, PCS>,
-        opening_point: &[F],
-    ) -> Self {
+    fn open(polynomials_primary: &SurgePolysPrimary<F, PCS>, opening_point: &[F]) -> Self {
         let chis = EqPolynomial::evals(opening_point);
         let evaluate = |poly: &DensePolynomial<F>| -> F { poly.evaluate_at_chi(&chis) };
         Self {
             _marker: PhantomData,
-            f_openings: polynomials_logup.f.par_iter().map(evaluate).collect(),
             m_openings: polynomials_primary.m.par_iter().map(evaluate).collect(),
             sid: None,
             t: None,
@@ -246,27 +201,17 @@ where
     fn prove_openings(
         generators: &PCS::Setup,
         polynomials_primary: &SurgePolysPrimary<F, PCS>,
-        polynomials_logup: &SurgePolysLogup<F, PCS>,
         opening_point: &[F],
         openings: &Self,
         transcript: &mut ProofTranscript,
     ) -> Self::Proof {
-        let polys = polynomials_logup
-            .f
-            .iter()
-            .chain(polynomials_primary.m.iter())
-            .collect::<Vec<_>>();
-        let openings = [
-            openings.f_openings.as_slice(),
-            openings.m_openings.as_slice(),
-        ]
-        .concat();
+        let polys = polynomials_primary.m.iter().collect::<Vec<_>>();
 
         PCS::batch_prove(
             generators,
             &polys,
             opening_point,
-            &openings,
+            &openings.m_openings,
             BatchType::SurgeReadWrite,
             transcript,
         )
@@ -288,22 +233,15 @@ where
         generators: &PCS::Setup,
         opening_proof: &Self::Proof,
         commitment_primary: &SurgeCommitmentPrimary<PCS>,
-        commitment_logup: &SurgeCommitmentLogup<PCS>,
         opening_point: &[F],
         transcript: &mut ProofTranscript,
     ) -> Result<(), ProofVerifyError> {
-        let openings: Vec<F> = [self.f_openings.as_slice(), self.m_openings.as_slice()].concat();
-
         PCS::batch_verify(
             opening_proof,
             generators,
             opening_point,
-            &openings,
-            &commitment_logup
-                .f_commitment
-                .iter()
-                .chain(commitment_primary.m_commitment.iter())
-                .collect::<Vec<_>>(),
+            &self.m_openings,
+            &commitment_primary.m_commitment.iter().collect::<Vec<_>>(),
             transcript,
         )
     }
@@ -314,12 +252,11 @@ pub struct SurgeLogupGPolyOpenings<F>
 where
     F: JoltField,
 {
-    g_openings: Vec<F>,
     dim_openings: Vec<F>,
     e_poly_openings: Vec<F>,
 }
 
-impl<F, PCS> StructuredOpeningProof2<F, PCS, SurgePolysPrimary<F, PCS>, SurgePolysLogup<F, PCS>>
+impl<F, PCS> StructuredOpeningProof<F, PCS, SurgePolysPrimary<F, PCS>>
     for SurgeLogupGPolyOpenings<F>
 where
     F: JoltField,
@@ -328,15 +265,10 @@ where
     type Proof = PCS::BatchedProof;
 
     #[tracing::instrument(skip_all, name = "SurgeLogupOpenings::open")]
-    fn open(
-        polynomials_primary: &SurgePolysPrimary<F, PCS>,
-        polynomials_logup: &SurgePolysLogup<F, PCS>,
-        opening_point: &[F],
-    ) -> Self {
+    fn open(polynomials_primary: &SurgePolysPrimary<F, PCS>, opening_point: &[F]) -> Self {
         let chis = EqPolynomial::evals(opening_point);
         let evaluate = |poly: &DensePolynomial<F>| -> F { poly.evaluate_at_chi(&chis) };
         Self {
-            g_openings: polynomials_logup.g.par_iter().map(evaluate).collect(),
             dim_openings: polynomials_primary.dim.par_iter().map(evaluate).collect(),
             e_poly_openings: polynomials_primary
                 .E_polys
@@ -350,19 +282,16 @@ where
     fn prove_openings(
         generators: &PCS::Setup,
         polynomials_primary: &SurgePolysPrimary<F, PCS>,
-        polynomials_logup: &SurgePolysLogup<F, PCS>,
         opening_point: &[F],
         openings: &Self,
         transcript: &mut ProofTranscript,
     ) -> Self::Proof {
-        let polys = polynomials_logup
-            .g
+        let polys = polynomials_primary
+            .dim
             .iter()
-            .chain(polynomials_primary.dim.iter())
             .chain(polynomials_primary.E_polys.iter())
             .collect::<Vec<_>>();
         let openings = [
-            openings.g_openings.as_slice(),
             openings.dim_openings.as_slice(),
             openings.e_poly_openings.as_slice(),
         ]
@@ -383,12 +312,10 @@ where
         generators: &PCS::Setup,
         opening_proof: &Self::Proof,
         commitment_primary: &SurgeCommitmentPrimary<PCS>,
-        commitment_logup: &SurgeCommitmentLogup<PCS>,
         opening_point: &[F],
         transcript: &mut ProofTranscript,
     ) -> Result<(), ProofVerifyError> {
         let openings: Vec<F> = [
-            self.g_openings.as_slice(),
             self.dim_openings.as_slice(),
             self.e_poly_openings.as_slice(),
         ]
@@ -399,10 +326,9 @@ where
             generators,
             opening_point,
             &openings,
-            &commitment_logup
-                .g_commitment
+            &commitment_primary
+                .dim_commitment
                 .iter()
-                .chain(commitment_primary.dim_commitment.iter())
                 .chain(commitment_primary.E_commitment.iter())
                 .collect::<Vec<_>>(),
             transcript,
@@ -434,6 +360,7 @@ where
         i % C
     }
 
+    #[tracing::instrument(skip_all, name = "SurgeCommons::polys_from_evals")]
     fn polys_from_evals(all_evals: &Vec<Vec<F>>) -> Vec<DensePolynomial<F>> {
         all_evals
             .iter()
@@ -441,6 +368,7 @@ where
             .collect()
     }
 
+    #[tracing::instrument(skip_all, name = "SurgeCommons::polys_from_evals_usize")]
     fn polys_from_evals_usize(all_evals_usize: &Vec<Vec<usize>>) -> Vec<DensePolynomial<F>> {
         all_evals_usize
             .iter()
@@ -455,33 +383,22 @@ where
     PCS: CommitmentScheme<Field = F>,
     Instruction: JoltInstruction + Default,
 {
-    pub commitment_logup: SurgeCommitmentLogup<PCS>,
-
-    pub sumcheck_f: SumcheckInstanceProof<F>,
-    pub sumcheck_g: SumcheckInstanceProof<F>,
-    pub primary_sumcheck_claim: F,
-    pub sumcheck_f_openings: Vec<F>,
-    pub sumcheck_f_openings_proof: PCS::BatchedProof,
-    pub sumcheck_g_openings: Vec<F>,
-    pub sumcheck_g_openings_proof: PCS::BatchedProof,
-    pub m: usize,
-    pub n: usize,
-    pub zerocheck_f: ZerocheckInstanceProof<F>,
-    pub zerocheck_g: ZerocheckInstanceProof<F>,
+    pub f_final_claims: Vec<Pair<F>>,
+    pub f_proof: BatchedRationalSumProof<PCS>,
+    pub g_final_claims: Vec<Pair<F>>,
+    pub g_proof: BatchedRationalSumProof<PCS>,
     pub f_openings: SurgeLogupFPolyOpenings<F, Instruction, C, M>,
     pub f_openings_proof:
-        <SurgeLogupFPolyOpenings<F, Instruction, C, M> as StructuredOpeningProof2<
+        <SurgeLogupFPolyOpenings<F, Instruction, C, M> as StructuredOpeningProof<
             F,
             PCS,
             SurgePolysPrimary<F, PCS>,
-            SurgePolysLogup<F, PCS>,
         >>::Proof,
     pub g_openings: SurgeLogupGPolyOpenings<F>,
-    pub g_openings_proof: <SurgeLogupGPolyOpenings<F> as StructuredOpeningProof2<
+    pub g_openings_proof: <SurgeLogupGPolyOpenings<F> as StructuredOpeningProof<
         F,
         PCS,
         SurgePolysPrimary<F, PCS>,
-        SurgePolysLogup<F, PCS>,
     >>::Proof,
 }
 
@@ -505,176 +422,116 @@ where
         b"logup"
     }
 
+    #[tracing::instrument(skip_all, name = "LogupCheckingProof::compute_leaves")]
+    fn compute_leaves(
+        preprocessing: &SurgePreprocessing<F, Instruction, C, M>,
+        polynomials: &SurgePolysPrimary<F, PCS>,
+        beta: &F,
+        gamma: &F,
+    ) -> (Vec<Vec<Pair<F>>>, Vec<Vec<Pair<F>>>) {
+        let num_lookups = polynomials.dim[0].len();
+
+        let g_leaves = (0..Self::num_memories())
+            .into_par_iter()
+            .map(|memory_index| -> Vec<Pair<F>> {
+                let dim_index = Self::memory_to_dimension_index(memory_index);
+                (0..num_lookups)
+                    .map(|i| Pair {
+                        p: F::one(),
+                        q: polynomials.E_polys[memory_index][i].mul_0_optimized(*gamma)
+                            + polynomials.dim[dim_index][i]
+                            + *beta,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        let f_leaves = (0..Self::num_memories())
+            .into_par_iter()
+            .map(|memory_index| {
+                let dim_index = Self::memory_to_dimension_index(memory_index);
+                let subtable_index = Self::memory_to_subtable_index(memory_index);
+                // TODO(moodlezoup): Only need one init polynomial per subtable
+                (0..M)
+                    .map(|i| Pair {
+                        p: polynomials.m[dim_index][i],
+                        q: preprocessing.materialized_subtables[subtable_index][i]
+                            .mul_0_optimized(*gamma)
+                            + F::from_u64(i as u64).unwrap()
+                            + *beta,
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+
+        (f_leaves, g_leaves)
+    }
+
+    #[tracing::instrument(skip_all, name = "LogupCheckingProof::prove_logup_checking")]
     fn prove_logup_checking(
         generators: &PCS::Setup,
-        // preprocessing: &SurgePreprocessing<F, Instruction, C, M>,
+        preprocessing: &SurgePreprocessing<F, Instruction, C, M>,
         polynomials_primary: &SurgePolysPrimary<F, PCS>,
         transcript: &mut ProofTranscript,
     ) -> LogupCheckingProof<F, PCS, Instruction, C, M> {
         transcript.append_protocol_name(Self::protocol_name());
 
-        let num_memories = Self::num_memories();
-        let num_subtables = Self::num_subtables();
-
         // We assume that primary commitments are already appended to the transcript
-        let beta = transcript.challenge_scalar(b"logup_beta");
-        let gamma = transcript.challenge_scalar(b"logup_gamma");
+        let beta: F = transcript.challenge_scalar(b"logup_beta");
+        let gamma: F = transcript.challenge_scalar(b"logup_gamma");
 
-        let polynomials_logup = Self::compute_logup_polys(&polynomials_primary, beta, gamma);
-        let commitment_logup = polynomials_logup.commit(generators);
-        commitment_logup.append_to_transcript(b"logup_commitment", transcript);
+        let (f_leaves, g_leaves) =
+            Self::compute_leaves(preprocessing, polynomials_primary, &beta, &gamma);
 
-        let r = transcript.challenge_vector(b"logup_linear_comb", num_memories);
-        let sumcheck_comb =
-            |vals: &[F]| -> F { vals.iter().enumerate().map(|(i, val)| r[i] * val).sum() };
+        let mut f_batched_circuit =
+            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::construct(f_leaves);
+        let f_claims =
+            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::claims(&f_batched_circuit);
+        let (f_proof, r_f) =
+            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::prove_rational_sum(
+                &mut f_batched_circuit,
+                transcript,
+                Some(generators),
+            );
 
-        // Primary sumchecks
-        let primary_sumcheck_claim = Self::calculate_logup_sumcheck_claim(&polynomials_logup, &r);
-        let n = polynomials_logup.f[0].get_num_vars();
-        let m = polynomials_logup.g[0].get_num_vars();
-        let (sumcheck_f, r_f, f_evals) = SumcheckInstanceProof::prove_arbitrary(
-            &primary_sumcheck_claim,
-            n,
-            &mut polynomials_logup.f.clone(),
-            sumcheck_comb,
-            1,
-            transcript,
-        );
-        let (sumcheck_g, r_g, g_evals) = SumcheckInstanceProof::prove_arbitrary(
-            &primary_sumcheck_claim,
-            m,
-            &mut polynomials_logup.g.clone(),
-            sumcheck_comb,
-            1,
-            transcript,
-        );
+        let mut g_batched_circuit =
+            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::construct(g_leaves);
+        let g_claims =
+            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::claims(&g_batched_circuit);
+        let (g_proof, r_g) =
+            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::prove_rational_sum(
+                &mut g_batched_circuit,
+                transcript,
+                Some(generators),
+            );
 
-        let sumcheck_f_openings_proof = PCS::batch_prove(
-            generators,
-            &polynomials_logup.f.iter().collect::<Vec<_>>(),
-            &r_f,
-            &f_evals,
-            BatchType::SurgeReadWrite,
-            transcript,
-        );
-        let sumcheck_g_openings_proof = PCS::batch_prove(
-            generators,
-            &polynomials_logup.g.iter().collect::<Vec<_>>(),
-            &r_g,
-            &g_evals,
-            BatchType::SurgeReadWrite,
-            transcript,
-        );
+        drop_in_background_thread(f_batched_circuit);
+        drop_in_background_thread(g_batched_circuit);
 
-        let mut zerocheck_f_polys = [
-            &polynomials_logup.f[..],
-            &polynomials_primary.m[..],
-            &polynomials_primary.T_polys[..],
-        ]
-        .concat();
-
-        // TODO: This is really stupid
-        // The correct way is probably to properly specialize this sumcheck
-        zerocheck_f_polys.push(DensePolynomial::new(
-            (0..polynomials_logup.f[0].len())
-                .map(|i| F::from_u64(i as u64).unwrap())
-                .collect_vec(),
-        ));
-
-        let zerocheck_f_comb = |vals: &[F]| -> F {
-            let f_vals = &vals[..num_memories];
-            let m_vals = &vals[num_memories..num_memories + C];
-            let t_vals = &vals[num_memories + C..num_memories + C + num_subtables];
-            let sid_val = vals[vals.len() - 1];
-            (0..num_memories)
-                .map(|i| -> F {
-                    let subtable_index = Self::memory_to_subtable_index(i);
-                    let dimension_index = Self::memory_to_dimension_index(i);
-                    let val = (beta + sid_val + gamma * t_vals[subtable_index]) * f_vals[i]
-                        - m_vals[dimension_index];
-                    r[i] * val
-                })
-                .sum()
-        };
-        let (zerocheck_f, r_f_2, f_evals_2) = ZerocheckInstanceProof::prove_arbitrary(
-            n,
-            &mut zerocheck_f_polys,
-            zerocheck_f_comb,
-            2,
-            transcript,
-        );
-
-        let mut zerocheck_g_polys = [
-            &polynomials_logup.g[..],
-            &polynomials_primary.E_polys[..],
-            &polynomials_primary.dim[..],
-        ]
-        .concat();
-
-        let zerocheck_g_comb = |vals: &[F]| -> F {
-            let g_vals = &vals[..num_memories];
-            let E_vals = &vals[num_memories..2 * num_memories];
-            let dim_vals = &vals[2 * num_memories..];
-            (0..num_memories)
-                .map(|i| -> F {
-                    let dimension_index = Self::memory_to_dimension_index(i);
-                    let val = (beta + dim_vals[dimension_index] + gamma * E_vals[i]) * g_vals[i]
-                        - F::one();
-                    r[i] * val
-                })
-                .sum()
-        };
-        let (zerocheck_g, r_g_2, g_evals_2) = ZerocheckInstanceProof::prove_arbitrary(
-            m,
-            &mut zerocheck_g_polys,
-            zerocheck_g_comb,
-            2,
-            transcript,
-        );
-
-        let f_openings = SurgeLogupFPolyOpenings::<F, Instruction, C, M> {
-            _marker: PhantomData,
-            f_openings: f_evals_2[..num_memories].to_vec(),
-            m_openings: f_evals_2[num_memories..num_memories + C].to_vec(),
-            sid: None,
-            t: None,
-        };
+        let f_openings =
+            SurgeLogupFPolyOpenings::<F, Instruction, C, M>::open(polynomials_primary, &r_f);
         let f_openings_proof = SurgeLogupFPolyOpenings::<F, Instruction, C, M>::prove_openings(
             generators,
             &polynomials_primary,
-            &polynomials_logup,
-            &r_f_2,
+            &r_f,
             &f_openings,
             transcript,
         );
 
-        let g_openings = SurgeLogupGPolyOpenings {
-            g_openings: g_evals_2[..num_memories].to_vec(),
-            e_poly_openings: g_evals_2[num_memories..2 * num_memories].to_vec(),
-            dim_openings: g_evals_2[2 * num_memories..].to_vec(),
-        };
-        let g_openings_proof = SurgeLogupGPolyOpenings::prove_openings(
+        let g_openings = SurgeLogupGPolyOpenings::<F>::open(polynomials_primary, &r_g);
+        let g_openings_proof = SurgeLogupGPolyOpenings::<F>::prove_openings(
             generators,
             &polynomials_primary,
-            &polynomials_logup,
-            &r_g_2,
+            &r_g,
             &g_openings,
             transcript,
         );
 
         LogupCheckingProof {
-            commitment_logup,
-            sumcheck_f,
-            sumcheck_g,
-            primary_sumcheck_claim,
-            zerocheck_f,
-            zerocheck_g,
-            sumcheck_f_openings: f_evals,
-            sumcheck_f_openings_proof,
-            sumcheck_g_openings: g_evals,
-            sumcheck_g_openings_proof,
-            m,
-            n,
+            f_final_claims: f_claims,
+            f_proof,
+            g_final_claims: g_claims,
+            g_proof,
             f_openings,
             f_openings_proof,
             g_openings,
@@ -682,6 +539,37 @@ where
         }
     }
 
+    fn check_openings(
+        proof: &LogupCheckingProof<F, PCS, Instruction, C, M>,
+        claims_f: Vec<Pair<F>>,
+        claims_g: Vec<Pair<F>>,
+        beta: &F,
+        gamma: &F,
+    ) {
+        let sid = proof.f_openings.sid.unwrap();
+        let t = proof.f_openings.t.as_ref().unwrap();
+
+        claims_f.iter().enumerate().for_each(|(i, claim)| {
+            assert_eq!(claim.p, proof.f_openings.m_openings[i]);
+            let subtable_idx = Self::memory_to_subtable_index(i);
+            assert_eq!(
+                claim.q,
+                *beta + sid + t[subtable_idx].mul_01_optimized(*gamma)
+            );
+        });
+
+        claims_g.iter().enumerate().for_each(|(i, claim)| {
+            assert_eq!(claim.p, F::one());
+            assert_eq!(
+                claim.q,
+                *beta
+                    + proof.g_openings.dim_openings[i]
+                    + proof.g_openings.e_poly_openings[i] * *gamma
+            );
+        });
+    }
+
+    #[tracing::instrument(skip_all, name = "LogupCheckingProof::verify_logup_checking")]
     fn verify_logup_checking(
         preprocessing: &SurgePreprocessing<F, Instruction, C, M>,
         generators: &PCS::Setup,
@@ -697,181 +585,53 @@ where
         let beta: F = transcript.challenge_scalar(b"logup_beta");
         let gamma: F = transcript.challenge_scalar(b"logup_gamma");
 
-        proof
-            .commitment_logup
-            .append_to_transcript(b"logup_commitment", transcript);
+        // Check that the final claims are equal
+        (0..num_memories).into_par_iter().for_each(|i| {
+            assert_eq!(
+                proof.f_final_claims[i].p * proof.g_final_claims[i].q,
+                proof.f_final_claims[i].q * proof.g_final_claims[i].p,
+                "Final claims are inconsistent"
+            );
+        });
 
-        let r: Vec<F> = transcript.challenge_vector(b"logup_linear_comb", num_memories);
-        let sumcheck_comb =
-            |vals: &[F]| -> F { vals.iter().enumerate().map(|(i, val)| r[i] * val).sum() };
-
-        let (claims_sumcheck_f, r_f) =
-            proof
-                .sumcheck_f
-                .verify(proof.primary_sumcheck_claim, proof.n, 1, transcript)?;
-        let (claims_sumcheck_g, r_g) =
-            proof
-                .sumcheck_g
-                .verify(proof.primary_sumcheck_claim, proof.m, 1, transcript)?;
-        assert_eq!(
-            claims_sumcheck_f,
-            sumcheck_comb(&proof.sumcheck_f_openings),
-            "Primary sumcheck failed f"
-        );
-        assert_eq!(
-            claims_sumcheck_g,
-            sumcheck_comb(&proof.sumcheck_g_openings),
-            "Primary sumcheck failed g"
-        );
-
-        PCS::batch_verify(
-            &proof.sumcheck_f_openings_proof,
-            generators,
-            &r_f,
-            &proof.sumcheck_f_openings,
-            &proof
-                .commitment_logup
-                .f_commitment
-                .iter()
-                .collect::<Vec<_>>(),
-            transcript,
-        )?;
-        PCS::batch_verify(
-            &proof.sumcheck_g_openings_proof,
-            generators,
-            &r_g,
-            &proof.sumcheck_g_openings,
-            &proof
-                .commitment_logup
-                .g_commitment
-                .iter()
-                .collect::<Vec<_>>(),
-            transcript,
-        )?;
-
-        // Zerochecks
-        let (claims_zerocheck_f, eq_f, r_f_2) = proof.zerocheck_f.verify(proof.n, 2, transcript)?;
-        let (claims_zerocheck_g, eq_g, r_g_2) = proof.zerocheck_g.verify(proof.m, 2, transcript)?;
-        StructuredOpeningProof2::<
-            F,
-            PCS,
-            SurgePolysPrimary<F, PCS>,
-            SurgePolysLogup<F, PCS>,
-        >::compute_verifier_openings(&mut proof.f_openings, preprocessing, &r_f_2);
-
-        let zerocheck_f_comb = |openings: &SurgeLogupFPolyOpenings<F, Instruction, C, M>| -> F {
-            let sid = openings.sid.unwrap();
-            let t = openings.t.as_ref().unwrap();
-
-            (0..num_memories)
-                .map(|i| -> F {
-                    let subtable_index = Self::memory_to_subtable_index(i);
-                    let dimension_index = Self::memory_to_dimension_index(i);
-                    let val = (beta + sid + gamma * t[subtable_index]) * openings.f_openings[i]
-                        - openings.m_openings[dimension_index];
-                    r[i] * val
-                })
-                .sum()
-        };
-
-        assert_eq!(
-            claims_zerocheck_f,
-            zerocheck_f_comb(&proof.f_openings) * eq_f
-        );
-
-        let zerocheck_g_comb = |openings: &SurgeLogupGPolyOpenings<F>| -> F {
-            (0..num_memories)
-                .map(|i| -> F {
-                    let dimension_index = Self::memory_to_dimension_index(i);
-                    let val = (beta
-                        + openings.dim_openings[dimension_index]
-                        + gamma * openings.e_poly_openings[i])
-                        * openings.g_openings[i]
-                        - F::one();
-                    r[i] * val
-                })
-                .sum()
-        };
-        assert_eq!(
-            claims_zerocheck_g,
-            zerocheck_g_comb(&proof.g_openings) * eq_g
-        );
+        let (claims_f, r_f) =
+            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::verify_rational_sum(
+                &proof.f_proof,
+                &proof.f_final_claims,
+                transcript,
+                Some(generators),
+            );
+        let (claims_g, r_g) =
+            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::verify_rational_sum(
+                &proof.g_proof,
+                &proof.g_final_claims,
+                transcript,
+                Some(generators),
+            );
 
         proof.f_openings.verify_openings(
             generators,
             &proof.f_openings_proof,
             commitment_primary,
-            &proof.commitment_logup,
-            &r_f_2,
+            &r_f,
             transcript,
         )?;
         proof.g_openings.verify_openings(
             generators,
             &proof.g_openings_proof,
             commitment_primary,
-            &proof.commitment_logup,
-            &r_g_2,
+            &r_g,
             transcript,
-        )
-    }
+        )?;
+        <SurgeLogupFPolyOpenings<F, Instruction, C, M> as StructuredOpeningProof<
+            F,
+            PCS,
+            SurgePolysPrimary<F, PCS>,
+        >>::compute_verifier_openings(&mut proof.f_openings, preprocessing, &r_f);
 
-    fn calculate_logup_sumcheck_claim(polys: &SurgePolysLogup<F, PCS>, r: &[F]) -> F {
-        polys
-            .g
-            .iter()
-            .enumerate()
-            .map(|(i, g_poly)| r[i] * g_poly.Z.iter().sum::<F>())
-            .sum()
-    }
+        Self::check_openings(&proof, claims_f, claims_g, &beta, &gamma);
 
-    fn compute_logup_polys(
-        polys: &SurgePolysPrimary<F, PCS>,
-        beta: F,
-        gamma: F,
-    ) -> SurgePolysLogup<F, PCS> {
-        let num_memories = Self::num_memories();
-        let num_lookups = polys.E_polys[0].len();
-
-        let mut g_i_evals = Vec::with_capacity(num_memories);
-        for E_index in 0..num_memories {
-            let mut g_evals = Vec::with_capacity(num_lookups);
-            for op_index in 0..num_lookups {
-                let dimension_index = Self::memory_to_dimension_index(E_index);
-                g_evals.push(
-                    F::one()
-                        / (beta
-                            + polys.dim[dimension_index][op_index]
-                            + gamma * polys.E_polys[E_index][op_index]),
-                );
-            }
-            g_i_evals.push(g_evals);
-        }
-        let g_poly = Self::polys_from_evals(&g_i_evals);
-
-        // Construct f
-        let f_i_evals = (0..num_memories)
-            .map(|f_index| {
-                let dimension_index = Self::memory_to_dimension_index(f_index);
-                let subtable_index = Self::memory_to_subtable_index(f_index);
-
-                izip!(
-                    &polys.m[dimension_index].Z,
-                    &polys.T_polys[subtable_index].Z
-                )
-                .enumerate()
-                .map(|(i, (m_val, t_val))| {
-                    (*m_val) / (beta + F::from_u64(i as u64).unwrap() + gamma * (*t_val))
-                })
-                .collect()
-            })
-            .collect();
-        let f_poly = Self::polys_from_evals(&f_i_evals);
-
-        SurgePolysLogup {
-            _marker: PhantomData,
-            f: f_poly,
-            g: g_poly,
-        }
+        Ok(())
     }
 }
 
@@ -1013,6 +773,7 @@ where
 
         let logup_checking = LogupCheckingProof::<F, PCS, Instruction, C, M>::prove_logup_checking(
             generators,
+            preprocessing,
             &polynomials,
             transcript,
         );
@@ -1024,6 +785,7 @@ where
         }
     }
 
+    #[tracing::instrument(skip_all, name = "Surge::verify")]
     pub fn verify(
         preprocessing: &SurgePreprocessing<F, Instruction, C, M>,
         generators: &PCS::Setup,
