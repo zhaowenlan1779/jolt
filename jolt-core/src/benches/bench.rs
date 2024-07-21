@@ -144,15 +144,15 @@ where
             //     SurgeProof::<Fr, HyraxScheme<G1Projective>, XORInstruction, C, M>::num_generators(128),
             //     b"LassoV1",
             // );
-            SurgeProof::<Fr, MockCommitScheme<Fr>, XORInstruction, C, M>::prove(
+            let proof = SurgeProof::<Fr, MockCommitScheme<Fr>, XORInstruction, C, M>::prove(
                 &preprocessing,
                 &(),
                 ops,
                 &mut transcript,
             );
 
-            // let mut transcript = ProofTranscript::new(b"test_transcript");
-            // SurgeProof::verify(&preprocessing, &(), proof, &mut transcript).expect("should work");
+            let mut transcript = ProofTranscript::new(b"test_transcript");
+            SurgeProof::verify(&preprocessing, &(), proof, &mut transcript).expect("should work");
         };
 
         (0..100).for_each(func);

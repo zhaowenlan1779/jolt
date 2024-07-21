@@ -178,8 +178,24 @@ where
 {
     _marker: PhantomData<Instruction>,
     m_openings: Vec<F>,
-    sid: Option<F>,    // Computed by verifier
-    t: Option<Vec<F>>, // Computed by verifier
+}
+
+impl<F, Instruction, const C: usize, const M: usize> SurgeLogupFPolyOpenings<F, Instruction, C, M>
+where
+    F: JoltField,
+    Instruction: JoltInstruction + Default,
+{
+    #[tracing::instrument(skip_all, name = "SurgeLogupOpenings::compute_sid_t")]
+    fn compute_sid_t(&self, opening_point: &[F]) -> (F, Vec<F>) {
+        rayon::join(
+            || IdentityPolynomial::new(opening_point.len()).evaluate(opening_point),
+            || Instruction::default()
+            .subtables(C, M)
+            .par_iter()
+            .map(|(subtable, _)| subtable.evaluate_mle(opening_point))
+            .collect()
+        )
+    }
 }
 
 impl<F, PCS, Instruction, const C: usize, const M: usize>
@@ -200,8 +216,6 @@ where
         Self {
             _marker: PhantomData,
             m_openings: polynomials_primary.m.par_iter().map(evaluate).collect(),
-            sid: None,
-            t: None,
         }
     }
 
@@ -223,18 +237,6 @@ where
             BatchType::SurgeReadWrite,
             transcript,
         )
-    }
-
-    #[tracing::instrument(skip_all, name = "SurgeLogupOpenings::compute_verifier_openings")]
-    fn compute_verifier_openings(&mut self, _: &Self::Preprocessing, opening_point: &[F]) {
-        self.sid = Some(IdentityPolynomial::new(opening_point.len()).evaluate(opening_point));
-        self.t = Some(
-            Instruction::default()
-                .subtables(C, M)
-                .par_iter()
-                .map(|(subtable, _)| subtable.evaluate_mle(opening_point))
-                .collect(),
-        );
     }
 
     #[tracing::instrument(skip_all, name = "SurgeLogupOpenings::verify_openings")]
@@ -585,30 +587,34 @@ where
         proof: &LogupCheckingProof<F, PCS, Instruction, C, M>,
         claims_f: Vec<Pair<F>>,
         claims_g: Vec<Pair<F>>,
+        sid: F,
+        t: Vec<F>,
         beta: &F,
         gamma: &F,
     ) {
-        let sid = proof.f_openings.sid.unwrap();
-        let t = proof.f_openings.t.as_ref().unwrap();
-
-        claims_f.into_par_iter().enumerate().for_each(|(i, claim)| {
-            assert_eq!(claim.p, proof.f_openings.m_openings[i]);
-            let subtable_idx = Self::memory_to_subtable_index(i);
-            assert_eq!(
-                claim.q,
-                *beta + sid + t[subtable_idx].mul_01_optimized(*gamma)
-            );
-        });
-
-        claims_g.into_par_iter().enumerate().for_each(|(i, claim)| {
-            assert_eq!(claim.p, F::one());
-            assert_eq!(
-                claim.q,
-                *beta
-                    + proof.g_openings.dim_openings[i]
-                    + proof.g_openings.e_poly_openings[i] * *gamma
-            );
-        });
+        rayon::join(
+            || {
+                claims_f.into_par_iter().enumerate().for_each(|(i, claim)| {
+                    assert_eq!(claim.p, proof.f_openings.m_openings[i]);
+                    let subtable_idx = Self::memory_to_subtable_index(i);
+                    assert_eq!(
+                        claim.q,
+                        *beta + sid + t[subtable_idx].mul_01_optimized(*gamma)
+                    );
+                })
+            },
+            || {
+                claims_g.into_par_iter().enumerate().for_each(|(i, claim)| {
+                    assert_eq!(claim.p, F::one());
+                    assert_eq!(
+                        claim.q,
+                        *beta
+                            + proof.g_openings.dim_openings[i]
+                            + proof.g_openings.e_poly_openings[i] * *gamma
+                    );
+                })
+            },
+        );
     }
 
     #[tracing::instrument(skip_all, name = "LogupCheckingProof::verify_logup_checking")]
@@ -628,52 +634,63 @@ where
         let gamma: F = transcript.challenge_scalar(b"logup_gamma");
 
         // Check that the final claims are equal
-        (0..num_memories).into_par_iter().for_each(|i| {
-            assert_eq!(
-                proof.f_final_claims[i].p * proof.g_final_claims[i].q,
-                proof.f_final_claims[i].q * proof.g_final_claims[i].p,
-                "Final claims are inconsistent"
-            );
-        });
+        rayon::join(
+            || {
+                (0..num_memories).into_par_iter().for_each(|i| {
+                    assert_eq!(
+                        proof.f_final_claims[i].p * proof.g_final_claims[i].q,
+                        proof.f_final_claims[i].q * proof.g_final_claims[i].p,
+                        "Final claims are inconsistent"
+                    );
+                });
+            },
+            || {
+                let (claims_f, r_f) = <BatchedSparseRationalSum<F, C> as BatchedRationalSum<
+                    F,
+                    PCS,
+                >>::verify_rational_sum(
+                    &proof.f_proof,
+                    &proof.f_final_claims,
+                    transcript,
+                    Some(generators),
+                );
+                let ((sid, t), result) = rayon::join(
+                    || proof.f_openings.compute_sid_t(&r_f),
+                    || {
+                        let (claims_g, r_g) = <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<
+                    F,
+                    PCS,
+                >>::verify_rational_sum(
+                    &proof.g_proof,
+                    &proof.g_final_claims,
+                    transcript,
+                    Some(generators),
+                );
 
-        let (claims_f, r_f) =
-            <BatchedSparseRationalSum<F, C> as BatchedRationalSum<F, PCS>>::verify_rational_sum(
-                &proof.f_proof,
-                &proof.f_final_claims,
-                transcript,
-                Some(generators),
-            );
-        let (claims_g, r_g) =
-            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F, PCS>>::verify_rational_sum(
-                &proof.g_proof,
-                &proof.g_final_claims,
-                transcript,
-                Some(generators),
-            );
+                        proof.f_openings.verify_openings(
+                            generators,
+                            &proof.f_openings_proof,
+                            commitment_primary,
+                            &r_f,
+                            transcript,
+                        )?;
+                        proof.g_openings.verify_openings(
+                            generators,
+                            &proof.g_openings_proof,
+                            commitment_primary,
+                            &r_g,
+                            transcript,
+                        )?;
+                        Ok((claims_f, claims_g))
+                    },
+                );
 
-        proof.f_openings.verify_openings(
-            generators,
-            &proof.f_openings_proof,
-            commitment_primary,
-            &r_f,
-            transcript,
-        )?;
-        proof.g_openings.verify_openings(
-            generators,
-            &proof.g_openings_proof,
-            commitment_primary,
-            &r_g,
-            transcript,
-        )?;
-        <SurgeLogupFPolyOpenings<F, Instruction, C, M> as StructuredOpeningProof<
-            F,
-            PCS,
-            SurgePolysPrimary<F, PCS>,
-        >>::compute_verifier_openings(&mut proof.f_openings, preprocessing, &r_f);
-
-        Self::check_openings(&proof, claims_f, claims_g, &beta, &gamma);
-
-        Ok(())
+                let (claims_f, claims_g) = result?;
+                Self::check_openings(&proof, claims_f, claims_g, sid, t, &beta, &gamma);
+                Ok(())
+            },
+        )
+        .1
     }
 }
 
@@ -857,28 +874,34 @@ where
             transcript,
         )?;
 
-        let eq_eval = EqPolynomial::new(r_primary_sumcheck.to_vec()).evaluate(&r_z);
-        assert_eq!(
-            eq_eval * instruction.combine_lookups(&proof.primary_sumcheck.openings, C, M),
-            claim_last,
-            "Primary sumcheck check failed."
-        );
+        rayon::join(
+            || {
+                proof.primary_sumcheck.openings.verify_openings(
+                    generators,
+                    &proof.primary_sumcheck.opening_proof,
+                    &proof.commitment,
+                    &r_z,
+                    transcript,
+                )?;
 
-        proof.primary_sumcheck.openings.verify_openings(
-            generators,
-            &proof.primary_sumcheck.opening_proof,
-            &proof.commitment,
-            &r_z,
-            transcript,
-        )?;
-
-        LogupCheckingProof::<F, PCS, Instruction, C, M>::verify_logup_checking(
-            preprocessing,
-            generators,
-            proof.logup_checking,
-            &proof.commitment,
-            transcript,
+                LogupCheckingProof::<F, PCS, Instruction, C, M>::verify_logup_checking(
+                    preprocessing,
+                    generators,
+                    proof.logup_checking,
+                    &proof.commitment,
+                    transcript,
+                )
+            },
+            || {
+                let eq_eval = EqPolynomial::new(r_primary_sumcheck.to_vec()).evaluate(&r_z);
+                assert_eq!(
+                    eq_eval * instruction.combine_lookups(&proof.primary_sumcheck.openings, C, M),
+                    claim_last,
+                    "Primary sumcheck check failed."
+                );
+            },
         )
+        .0
     }
 
     #[tracing::instrument(skip_all, name = "Surge::construct_polys")]
