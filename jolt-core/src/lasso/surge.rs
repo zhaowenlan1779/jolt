@@ -1,14 +1,18 @@
 use crate::field::{JoltField, OptimizedMul};
 use crate::lasso::memory_checking::NoPreprocessing;
+use crate::poly;
 use crate::poly::commitment::commitment_scheme::BatchType;
 use crate::subprotocols::rational_sum::{
-    BatchedDenseRationalSum, BatchedRationalSum, BatchedRationalSumProof, Pair,
+    BatchedDenseRationalSum, BatchedRationalSum, BatchedRationalSumProof, BatchedSparseRationalSum,
+    Pair,
 };
 use crate::utils::thread::drop_in_background_thread;
 use crate::utils::transcript::AppendToTranscript;
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
+use rayon::iter::IndexedParallelIterator;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use std::marker::{PhantomData, Sync};
+use std::mem::take;
 
 use crate::{
     jolt::instruction::JoltInstruction,
@@ -34,6 +38,10 @@ where
     pub T_polys: Vec<DensePolynomial<F>>, // Size NUM_MEMORIES
     pub E_polys: Vec<DensePolynomial<F>>, // Size NUM_MEMORIES
     pub m: Vec<DensePolynomial<F>>,       // Size C
+
+    // Sparse representation of m
+    pub m_indices: Vec<Vec<usize>>,
+    pub m_values: Vec<Vec<F>>,
 }
 
 pub struct SurgePolysLogup<F, PCS>
@@ -217,17 +225,19 @@ where
         )
     }
 
+    #[tracing::instrument(skip_all, name = "SurgeLogupOpenings::compute_verifier_openings")]
     fn compute_verifier_openings(&mut self, _: &Self::Preprocessing, opening_point: &[F]) {
         self.sid = Some(IdentityPolynomial::new(opening_point.len()).evaluate(opening_point));
         self.t = Some(
             Instruction::default()
                 .subtables(C, M)
-                .iter()
+                .par_iter()
                 .map(|(subtable, _)| subtable.evaluate_mle(opening_point))
                 .collect(),
         );
     }
 
+    #[tracing::instrument(skip_all, name = "SurgeLogupOpenings::verify_openings")]
     fn verify_openings(
         &self,
         generators: &PCS::Setup,
@@ -425,53 +435,66 @@ where
     #[tracing::instrument(skip_all, name = "LogupCheckingProof::compute_leaves")]
     fn compute_leaves(
         preprocessing: &SurgePreprocessing<F, Instruction, C, M>,
-        polynomials: &SurgePolysPrimary<F, PCS>,
+        polynomials: &mut SurgePolysPrimary<F, PCS>,
         beta: &F,
         gamma: &F,
-    ) -> (Vec<Vec<Pair<F>>>, Vec<Vec<Pair<F>>>) {
+    ) -> (
+        (Vec<Vec<usize>>, Vec<Vec<F>>, Vec<Vec<F>>),
+        (Vec<Vec<F>>, Vec<Vec<F>>),
+    ) {
         let num_lookups = polynomials.dim[0].len();
-
-        let g_leaves = (0..Self::num_memories())
-            .into_par_iter()
-            .map(|memory_index| -> Vec<Pair<F>> {
-                let dim_index = Self::memory_to_dimension_index(memory_index);
-                (0..num_lookups)
-                    .map(|i| Pair {
-                        p: F::one(),
-                        q: polynomials.E_polys[memory_index][i].mul_0_optimized(*gamma)
-                            + polynomials.dim[dim_index][i]
-                            + *beta,
+        let (g_leaves, f_leaves_q) = rayon::join(
+            || {
+                (0..Self::num_memories())
+                    .into_par_iter()
+                    .map(|memory_index| -> (Vec<F>, Vec<F>) {
+                        let dim_index = Self::memory_to_dimension_index(memory_index);
+                        (0..num_lookups)
+                            .map(|i| {
+                                (
+                                    F::one(),
+                                    polynomials.E_polys[memory_index][i].mul_0_optimized(*gamma)
+                                        + polynomials.dim[dim_index][i]
+                                        + *beta,
+                                )
+                            })
+                            .unzip()
                     })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        let f_leaves = (0..Self::num_memories())
-            .into_par_iter()
-            .map(|memory_index| {
-                let dim_index = Self::memory_to_dimension_index(memory_index);
-                let subtable_index = Self::memory_to_subtable_index(memory_index);
-                // TODO(moodlezoup): Only need one init polynomial per subtable
-                (0..M)
-                    .map(|i| Pair {
-                        p: polynomials.m[dim_index][i],
-                        q: preprocessing.materialized_subtables[subtable_index][i]
-                            .mul_0_optimized(*gamma)
-                            + F::from_u64(i as u64).unwrap()
-                            + *beta,
+                    .unzip()
+            },
+            || {
+                preprocessing
+                    .materialized_subtables
+                    .par_iter()
+                    .map(|subtable| {
+                        subtable
+                            .iter()
+                            .enumerate()
+                            .map(|(i, t_eval)| {
+                                t_eval.mul_0_optimized(*gamma)
+                                    + F::from_u64(i as u64).unwrap()
+                                    + *beta
+                            })
+                            .collect()
                     })
-                    .collect::<Vec<_>>()
-            })
-            .collect();
-
-        (f_leaves, g_leaves)
+                    .collect()
+            },
+        );
+        (
+            (
+                take(&mut polynomials.m_indices),
+                take(&mut polynomials.m_values),
+                f_leaves_q,
+            ),
+            g_leaves,
+        )
     }
 
     #[tracing::instrument(skip_all, name = "LogupCheckingProof::prove_logup_checking")]
     fn prove_logup_checking(
         generators: &PCS::Setup,
         preprocessing: &SurgePreprocessing<F, Instruction, C, M>,
-        polynomials_primary: &SurgePolysPrimary<F, PCS>,
+        polynomials_primary: &mut SurgePolysPrimary<F, PCS>,
         transcript: &mut ProofTranscript,
     ) -> LogupCheckingProof<F, PCS, Instruction, C, M> {
         transcript.append_protocol_name(Self::protocol_name());
@@ -483,23 +506,40 @@ where
         let (f_leaves, g_leaves) =
             Self::compute_leaves(preprocessing, polynomials_primary, &beta, &gamma);
 
-        let mut f_batched_circuit =
-            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::construct(f_leaves);
-        let f_claims =
-            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::claims(&f_batched_circuit);
+        let ((mut f_batched_circuit, f_claims), (mut g_batched_circuit, g_claims)) = rayon::join(
+            || {
+                let f_batched_circuit = <BatchedSparseRationalSum<F, C> as BatchedRationalSum<
+                    F,
+                    PCS,
+                >>::construct(f_leaves);
+                let f_claims =
+                    <BatchedSparseRationalSum<F, C> as BatchedRationalSum<F, PCS>>::claims(
+                        &f_batched_circuit,
+                    );
+                (f_batched_circuit, f_claims)
+            },
+            || {
+                let g_batched_circuit = <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<
+                    F,
+                    PCS,
+                >>::construct(g_leaves);
+                let g_claims =
+                    <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F, PCS>>::claims(
+                        &g_batched_circuit,
+                    );
+                (g_batched_circuit, g_claims)
+            },
+        );
+
         let (f_proof, r_f) =
-            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::prove_rational_sum(
+            <BatchedSparseRationalSum<F, C> as BatchedRationalSum<F, PCS>>::prove_rational_sum(
                 &mut f_batched_circuit,
                 transcript,
                 Some(generators),
             );
 
-        let mut g_batched_circuit =
-            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::construct(g_leaves);
-        let g_claims =
-            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::claims(&g_batched_circuit);
         let (g_proof, r_g) =
-            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::prove_rational_sum(
+            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F, PCS>>::prove_rational_sum(
                 &mut g_batched_circuit,
                 transcript,
                 Some(generators),
@@ -508,8 +548,11 @@ where
         drop_in_background_thread(f_batched_circuit);
         drop_in_background_thread(g_batched_circuit);
 
-        let f_openings =
-            SurgeLogupFPolyOpenings::<F, Instruction, C, M>::open(polynomials_primary, &r_f);
+        let (f_openings, g_openings) = rayon::join(
+            || SurgeLogupFPolyOpenings::<F, Instruction, C, M>::open(polynomials_primary, &r_f),
+            || SurgeLogupGPolyOpenings::<F>::open(polynomials_primary, &r_g),
+        );
+
         let f_openings_proof = SurgeLogupFPolyOpenings::<F, Instruction, C, M>::prove_openings(
             generators,
             &polynomials_primary,
@@ -517,8 +560,6 @@ where
             &f_openings,
             transcript,
         );
-
-        let g_openings = SurgeLogupGPolyOpenings::<F>::open(polynomials_primary, &r_g);
         let g_openings_proof = SurgeLogupGPolyOpenings::<F>::prove_openings(
             generators,
             &polynomials_primary,
@@ -539,6 +580,7 @@ where
         }
     }
 
+    #[tracing::instrument(skip_all, name = "LogupCheckingProof::check_openings")]
     fn check_openings(
         proof: &LogupCheckingProof<F, PCS, Instruction, C, M>,
         claims_f: Vec<Pair<F>>,
@@ -549,7 +591,7 @@ where
         let sid = proof.f_openings.sid.unwrap();
         let t = proof.f_openings.t.as_ref().unwrap();
 
-        claims_f.iter().enumerate().for_each(|(i, claim)| {
+        claims_f.into_par_iter().enumerate().for_each(|(i, claim)| {
             assert_eq!(claim.p, proof.f_openings.m_openings[i]);
             let subtable_idx = Self::memory_to_subtable_index(i);
             assert_eq!(
@@ -558,7 +600,7 @@ where
             );
         });
 
-        claims_g.iter().enumerate().for_each(|(i, claim)| {
+        claims_g.into_par_iter().enumerate().for_each(|(i, claim)| {
             assert_eq!(claim.p, F::one());
             assert_eq!(
                 claim.q,
@@ -595,14 +637,14 @@ where
         });
 
         let (claims_f, r_f) =
-            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::verify_rational_sum(
+            <BatchedSparseRationalSum<F, C> as BatchedRationalSum<F, PCS>>::verify_rational_sum(
                 &proof.f_proof,
                 &proof.f_final_claims,
                 transcript,
                 Some(generators),
             );
         let (claims_g, r_g) =
-            <BatchedDenseRationalSum<F> as BatchedRationalSum<F, PCS>>::verify_rational_sum(
+            <BatchedDenseRationalSum<F, 1> as BatchedRationalSum<F, PCS>>::verify_rational_sum(
                 &proof.g_proof,
                 &proof.g_final_claims,
                 transcript,
@@ -641,7 +683,7 @@ where
     Instruction: JoltInstruction + Default,
 {
     _instruction: PhantomData<Instruction>,
-    materialized_subtables: Vec<Vec<F>>,
+    pub materialized_subtables: Vec<Vec<F>>,
 }
 
 #[allow(clippy::type_complexity)]
@@ -721,7 +763,7 @@ where
         transcript.append_protocol_name(Self::protocol_name());
 
         let num_lookups = ops.len().next_power_of_two();
-        let polynomials = Self::construct_polys(preprocessing, &ops);
+        let mut polynomials = Self::construct_polys(preprocessing, &ops);
         let commitment = polynomials.commit(generators);
         commitment.append_to_transcript(b"primary_commitment", transcript);
 
@@ -774,7 +816,7 @@ where
         let logup_checking = LogupCheckingProof::<F, PCS, Instruction, C, M>::prove_logup_checking(
             generators,
             preprocessing,
-            &polynomials,
+            &mut polynomials,
             transcript,
         );
 
@@ -875,6 +917,21 @@ where
             }
         }
 
+        let (m_indices, m_values) = m_evals
+            .iter()
+            .map(|m_evals_it| {
+                let mut indices = vec![];
+                let mut values = vec![];
+                for (i, m) in m_evals_it.iter().enumerate() {
+                    if *m != 0 {
+                        indices.push(i);
+                        values.push(F::from_u64(*m as u64).unwrap());
+                    }
+                }
+                (indices, values)
+            })
+            .unzip();
+
         let dim_poly = Self::polys_from_evals_usize(&dim_usize);
         let m_poly = Self::polys_from_evals_usize(&m_evals);
 
@@ -907,6 +964,8 @@ where
             T_polys: T_poly,
             E_polys: E_poly,
             m: m_poly,
+            m_indices,
+            m_values,
         }
     }
 

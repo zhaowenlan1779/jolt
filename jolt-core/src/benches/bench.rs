@@ -1,17 +1,18 @@
 use crate::field::JoltField;
 use crate::host;
+use crate::jolt::instruction::xor::XORInstruction;
 use crate::jolt::vm::rv32i_vm::{RV32IJoltVM, C, M};
 use crate::jolt::vm::Jolt;
+use crate::lasso::surge::{SurgePreprocessing, SurgeProof};
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::commitment::hyperkzg::HyperKZG;
 use crate::poly::commitment::hyrax::HyraxScheme;
-use crate::poly::commitment::zeromorph::Zeromorph;
 use crate::poly::commitment::mock::MockCommitScheme;
-use crate::lasso::surge::{SurgePreprocessing, SurgeProof};
-use crate::jolt::instruction::xor::XORInstruction;
+use crate::poly::commitment::zeromorph::Zeromorph;
 use crate::utils::transcript::ProofTranscript;
 use ark_bn254::{Bn254, Fr, G1Projective};
 use serde::Serialize;
+use std::time::Instant;
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub enum PCSType {
@@ -65,7 +66,7 @@ pub fn benchmarks(
             BenchType::Sha2Chain => sha2chain::<Fr, MockCommitScheme<Fr>>(),
             BenchType::Fibonacci => fibonacci::<Fr, MockCommitScheme<Fr>>(),
             _ => panic!("BenchType does not have a mapping"),
-        }
+        },
         _ => panic!("PCS Type does not have a mapping"),
     }
 }
@@ -117,16 +118,11 @@ where
     // let mut program = host::Program::new(example_name);
     // program.set_input(input);
 
-    
-
     let task = move || {
-            
+        let preprocessing = SurgePreprocessing::preprocess();
 
-            let preprocessing = SurgePreprocessing::preprocess();
-
-
-            (0..100).for_each(|_| {
-                let ops = vec![
+        let func = |_| {
+            let ops = vec![
                 XORInstruction(12, 12),
                 XORInstruction(12, 82),
                 XORInstruction(12, 12),
@@ -143,21 +139,27 @@ where
             const C: usize = 8;
             const M: usize = 1 << 12;
             let mut transcript = ProofTranscript::new(b"test_transcript");
-            
+
             // let generators = PedersenGenerators::new(
             //     SurgeProof::<Fr, HyraxScheme<G1Projective>, XORInstruction, C, M>::num_generators(128),
             //     b"LassoV1",
             // );
-            let proof = SurgeProof::<Fr, MockCommitScheme<Fr>, XORInstruction, C, M>::prove(
+            SurgeProof::<Fr, MockCommitScheme<Fr>, XORInstruction, C, M>::prove(
                 &preprocessing,
                 &(),
                 ops,
                 &mut transcript,
             );
-    
-            let mut transcript = ProofTranscript::new(b"test_transcript");
-            SurgeProof::verify(&preprocessing, &(), proof, &mut transcript).expect("should work");
-        })
+
+            // let mut transcript = ProofTranscript::new(b"test_transcript");
+            // SurgeProof::verify(&preprocessing, &(), proof, &mut transcript).expect("should work");
+        };
+
+        (0..100).for_each(func);
+
+        let before = Instant::now();
+        (0..1000).for_each(func);
+        println!("Elapsed time: {:.2?}", before.elapsed());
     };
 
     // let task = move || {

@@ -543,6 +543,7 @@ impl<F: JoltField> SumcheckInstanceProof<F> {
     /// Returns (e, r)
     /// - `e`: Claimed evaluation at random point
     /// - `r`: Evaluation point
+    #[tracing::instrument(skip_all, name = "Sumcheck::verify")]
     pub fn verify(
         &self,
         claim: F,
