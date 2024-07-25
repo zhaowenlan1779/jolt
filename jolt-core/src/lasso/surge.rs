@@ -74,7 +74,7 @@ where
             PCS::batch_commit_polys(&self.dim, generators, BatchType::SurgeReadWrite);
         let E_commitment =
             PCS::batch_commit_polys(&self.E_polys, generators, BatchType::SurgeReadWrite);
-        let m_commitment = PCS::batch_commit_polys(&self.m, generators, BatchType::SurgeReadWrite);
+        let m_commitment = PCS::batch_commit_polys(&self.m, generators, BatchType::SurgeInitFinal);
 
         Self::Commitment {
             dim_commitment,
@@ -158,6 +158,7 @@ where
     }
 }
 
+#[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct SurgePrimarySumcheck<F, PCS>
 where
     F: JoltField,
@@ -189,11 +190,13 @@ where
     fn compute_sid_t(&self, opening_point: &[F]) -> (F, Vec<F>) {
         rayon::join(
             || IdentityPolynomial::new(opening_point.len()).evaluate(opening_point),
-            || Instruction::default()
-            .subtables(C, M)
-            .par_iter()
-            .map(|(subtable, _)| subtable.evaluate_mle(opening_point))
-            .collect()
+            || {
+                Instruction::default()
+                    .subtables(C, M)
+                    .par_iter()
+                    .map(|(subtable, _)| subtable.evaluate_mle(opening_point))
+                    .collect()
+            },
         )
     }
 }
@@ -234,7 +237,7 @@ where
             &polys,
             opening_point,
             &openings.m_openings,
-            BatchType::SurgeReadWrite,
+            BatchType::SurgeInitFinal,
             transcript,
         )
     }
@@ -375,7 +378,7 @@ where
     #[tracing::instrument(skip_all, name = "SurgeCommons::polys_from_evals")]
     fn polys_from_evals(all_evals: &Vec<Vec<F>>) -> Vec<DensePolynomial<F>> {
         all_evals
-            .iter()
+            .par_iter()
             .map(|evals| DensePolynomial::new(evals.to_vec()))
             .collect()
     }
@@ -383,12 +386,13 @@ where
     #[tracing::instrument(skip_all, name = "SurgeCommons::polys_from_evals_usize")]
     fn polys_from_evals_usize(all_evals_usize: &Vec<Vec<usize>>) -> Vec<DensePolynomial<F>> {
         all_evals_usize
-            .iter()
+            .par_iter()
             .map(|evals_usize| DensePolynomial::from_usize(&evals_usize))
             .collect()
     }
 }
 
+#[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct LogupCheckingProof<F, PCS, Instruction, const C: usize, const M: usize>
 where
     F: JoltField,
@@ -704,6 +708,7 @@ where
 }
 
 #[allow(clippy::type_complexity)]
+#[derive(CanonicalSerialize, CanonicalDeserialize)]
 pub struct SurgeProof<F, PCS, Instruction, const C: usize, const M: usize>
 where
     F: JoltField,
@@ -940,46 +945,61 @@ where
             }
         }
 
-        let (m_indices, m_values) = m_evals
-            .iter()
-            .map(|m_evals_it| {
-                let mut indices = vec![];
-                let mut values = vec![];
-                for (i, m) in m_evals_it.iter().enumerate() {
-                    if *m != 0 {
-                        indices.push(i);
-                        values.push(F::from_u64(*m as u64).unwrap());
+        let mut m_indices = vec![];
+        let mut m_values = vec![];
+        let mut dim_poly = vec![];
+        let mut m_poly = vec![];
+        let mut E_poly = vec![];
+        let mut T_poly = vec![];
+        rayon::scope(|s| {
+            s.spawn(|_| {
+                (m_indices, m_values) = m_evals
+                    .iter()
+                    .map(|m_evals_it| {
+                        let mut indices = vec![];
+                        let mut values = vec![];
+                        for (i, m) in m_evals_it.iter().enumerate() {
+                            if *m != 0 {
+                                indices.push(i);
+                                values.push(F::from_u64(*m as u64).unwrap());
+                            }
+                        }
+                        (indices, values)
+                    })
+                    .unzip();
+            });
+            s.spawn(|_| {
+                dim_poly = Self::polys_from_evals_usize(&dim_usize);
+            });
+            s.spawn(|_| {
+                m_poly = Self::polys_from_evals_usize(&m_evals);
+            });
+            s.spawn(|_| {
+                // Construct E
+                let mut E_i_evals = Vec::with_capacity(num_memories);
+                for E_index in 0..num_memories {
+                    let mut E_evals = Vec::with_capacity(num_lookups);
+                    for op_index in 0..num_lookups {
+                        let dimension_index = Self::memory_to_dimension_index(E_index);
+                        let subtable_index = Self::memory_to_subtable_index(E_index);
+
+                        let eval_index = dim_usize[dimension_index][op_index];
+                        let E_eval =
+                            preprocessing.materialized_subtables[subtable_index][eval_index];
+                        E_evals.push(E_eval);
                     }
+                    E_i_evals.push(E_evals);
                 }
-                (indices, values)
-            })
-            .unzip();
-
-        let dim_poly = Self::polys_from_evals_usize(&dim_usize);
-        let m_poly = Self::polys_from_evals_usize(&m_evals);
-
-        // Construct E
-        let mut E_i_evals = Vec::with_capacity(num_memories);
-        for E_index in 0..num_memories {
-            let mut E_evals = Vec::with_capacity(num_lookups);
-            for op_index in 0..num_lookups {
-                let dimension_index = Self::memory_to_dimension_index(E_index);
-                let subtable_index = Self::memory_to_subtable_index(E_index);
-
-                let eval_index = dim_usize[dimension_index][op_index];
-                let E_eval = preprocessing.materialized_subtables[subtable_index][eval_index];
-                E_evals.push(E_eval);
-            }
-            E_i_evals.push(E_evals);
-        }
-        let E_poly = Self::polys_from_evals(&E_i_evals);
-
-        // Construct T
-        let T_poly = preprocessing
-            .materialized_subtables
-            .iter()
-            .map(|subtable| DensePolynomial::new(subtable.to_vec()))
-            .collect::<Vec<_>>();
+                E_poly = Self::polys_from_evals(&E_i_evals);
+            });
+            s.spawn(|_| {
+                T_poly = preprocessing
+                    .materialized_subtables
+                    .iter()
+                    .map(|subtable| DensePolynomial::new(subtable.to_vec()))
+                    .collect::<Vec<_>>();
+            });
+        });
 
         SurgePolysPrimary {
             _marker: PhantomData,

@@ -11,8 +11,11 @@ use crate::poly::commitment::mock::MockCommitScheme;
 use crate::poly::commitment::zeromorph::Zeromorph;
 use crate::utils::transcript::ProofTranscript;
 use ark_bn254::{Bn254, Fr, G1Projective};
+use rand_core::RngCore;
 use serde::Serialize;
 use std::time::Instant;
+use ark_std::test_rng;
+use crate::poly::commitment::pedersen::PedersenGenerators;
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub enum PCSType {
@@ -120,46 +123,43 @@ where
 
     let task = move || {
         let preprocessing = SurgePreprocessing::preprocess();
+        
+        let generators = PedersenGenerators::new(
+            SurgeProof::<Fr, HyraxScheme<G1Projective>, XORInstruction, C, M>::num_generators(128),
+            b"LassoV1",
+        );
 
         let func = |_| {
-            let ops = vec![
-                XORInstruction(12, 12),
-                XORInstruction(12, 82),
-                XORInstruction(12, 12),
-                XORInstruction(25, 12),
-                XORInstruction(512, 112),
-                XORInstruction(412, 282),
-                XORInstruction(212, 152),
-                XORInstruction(725, 912),
-                XORInstruction(512, 612),
-                XORInstruction(412, 282),
-                XORInstruction(512, 152),
-                XORInstruction(725, 912),
-            ];
-            const C: usize = 8;
-            const M: usize = 1 << 12;
+            let mut rng = test_rng();
+            let ops = 
+                std::iter::repeat_with(|| XORInstruction((rng.next_u32() % 65536) as u64, (rng.next_u32() % 65536) as u64))
+                .take(256)
+                .collect();
+            const C: usize = 4;
+            const M: usize = 1 << 16;
             let mut transcript = ProofTranscript::new(b"test_transcript");
 
-            // let generators = PedersenGenerators::new(
-            //     SurgeProof::<Fr, HyraxScheme<G1Projective>, XORInstruction, C, M>::num_generators(128),
-            //     b"LassoV1",
-            // );
-            let proof = SurgeProof::<Fr, MockCommitScheme<Fr>, XORInstruction, C, M>::prove(
+            SurgeProof::<Fr, HyraxScheme<G1Projective>, XORInstruction, C, M>::prove(
                 &preprocessing,
-                &(),
+                &generators,
                 ops,
                 &mut transcript,
-            );
+            )
 
-            let mut transcript = ProofTranscript::new(b"test_transcript");
-            SurgeProof::verify(&preprocessing, &(), proof, &mut transcript).expect("should work");
+            // let mut transcript = ProofTranscript::new(b"test_transcript");
+            // SurgeProof::verify(&preprocessing, &(), proof, &mut transcript).expect("should work");
         };
 
-        (0..100).for_each(func);
+        (0..100).for_each(|i| {func(i);});
 
         let before = Instant::now();
-        (0..1000).for_each(func);
+        (0..1000).for_each(|i| {func(i);});
         println!("Elapsed time: {:.2?}", before.elapsed());
+
+        let proof = func(0);
+        println!("Proof sizing:");
+        // serialize_and_print_size("jolt_commitments", &jolt_commitments);
+        serialize_and_print_size("proof", &proof);
     };
 
     // let task = move || {
@@ -176,19 +176,7 @@ where
     //         preprocessing.clone(),
     //     );
 
-    //     println!("Proof sizing:");
-    //     // serialize_and_print_size("jolt_commitments", &jolt_commitments);
-    //     serialize_and_print_size("jolt_proof", &jolt_proof);
-    //     serialize_and_print_size(" jolt_proof.r1cs", &jolt_proof.r1cs);
-    //     serialize_and_print_size(" jolt_proof.bytecode", &jolt_proof.bytecode);
-    //     serialize_and_print_size(
-    //         " jolt_proof.read_write_memory",
-    //         &jolt_proof.read_write_memory,
-    //     );
-    //     serialize_and_print_size(
-    //         " jolt_proof.instruction_lookups",
-    //         &jolt_proof.instruction_lookups,
-    //     );
+    
 
     //     let verification_result = RV32IJoltVM::verify(preprocessing, jolt_proof, jolt_commitments);
     //     assert!(

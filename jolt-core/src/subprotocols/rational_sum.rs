@@ -343,7 +343,7 @@ pub trait BatchedRationalSumLayer<F: JoltField>:
 ///     / \      / \      / \      / \
 ///   L0   R0  L1   R1  L2   R2  L3   R3   <- This is layer would be represented as [L0, R0, L1, R1, L2, R2, L3, R3]
 ///                                           (as opposed to e.g. [L0, L1, L2, L3, R0, R1, R2, R3])
-pub type DenseRationalSumLayer<F> = Vec<Pair<F>>;
+pub type DenseRationalSumLayer<F> = Vec<F>;
 
 /// Represents a batch of `DenseRationalSumLayer`, all of the same length `layer_len`.
 #[derive(Debug, Clone)]
@@ -442,10 +442,6 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
         previous_round_claim: F,
         lambda: &F,
     ) -> UniPoly<F> {
-        let inner_func = |left: Pair<F>, right: Pair<F>| {
-            right.p * left.q + (left.p + left.q * *lambda) * right.q
-        };
-
         let evals = (0..eq_poly.len() / 2)
             .into_par_iter()
             .map(|i| {
@@ -458,32 +454,34 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                 };
                 let mut evals = (F::zero(), F::zero(), F::zero());
 
-                self.layers_p
-                    .iter()
-                    .enumerate()
-                    .for_each(|(batch_index, layer)| {
-                        let subtable_index = batch_index / C;
+                for subtable_index in 0..self.layers_p.len() / C {
+                    let left_q = (
+                        self.layers_q[subtable_index][4 * i],
+                        self.layers_q[subtable_index][4 * i + 2],
+                    );
+                    let right_q = (
+                        self.layers_q[subtable_index][4 * i + 1],
+                        self.layers_q[subtable_index][4 * i + 3],
+                    );
 
-                        let left = (
-                            Pair {
-                                p: layer[4 * i],
-                                q: self.layers_q[subtable_index][4 * i],
-                            },
-                            Pair {
-                                p: layer[4 * i + 2],
-                                q: self.layers_q[subtable_index][4 * i + 2],
-                            },
-                        );
-                        let right = (
-                            Pair {
-                                p: layer[4 * i + 1],
-                                q: self.layers_q[subtable_index][4 * i + 1],
-                            },
-                            Pair {
-                                p: layer[4 * i + 3],
-                                q: self.layers_q[subtable_index][4 * i + 3],
-                            },
-                        );
+                    let m_left_q = left_q.1 - left_q.0;
+                    let m_right_q = right_q.1 - right_q.0;
+
+                    let left_q_eval_2 = left_q.1 + m_left_q;
+                    let left_q_eval_3 = left_q_eval_2 + m_left_q;
+
+                    let right_q_eval_2 = right_q.1 + m_right_q;
+                    let right_q_eval_3 = right_q_eval_2 + m_right_q;
+
+                    let base = (
+                        *lambda * left_q.0 * right_q.0,
+                        *lambda * left_q_eval_2 * right_q_eval_2,
+                        *lambda * left_q_eval_3 * right_q_eval_3,
+                    );
+                    for batch_index in subtable_index * C..(subtable_index + 1) * C {
+                        let layer = &self.layers_p[batch_index];
+                        let left = (layer[4 * i], layer[4 * i + 2]);
+                        let right = (layer[4 * i + 1], layer[4 * i + 3]);
 
                         let m_left = left.1 - left.0;
                         let m_right = right.1 - right.0;
@@ -494,10 +492,18 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                         let right_eval_2 = right.1 + m_right;
                         let right_eval_3 = right_eval_2 + m_right;
 
-                        evals.0 += coeffs[batch_index] * inner_func(left.0, right.0);
-                        evals.1 += coeffs[batch_index] * inner_func(left_eval_2, right_eval_2);
-                        evals.2 += coeffs[batch_index] * inner_func(left_eval_3, right_eval_3);
-                    });
+                        evals.0 += coeffs[batch_index]
+                            * (base.0 + left.0 * right_q.0 + right.0 * left_q.0);
+                        evals.1 += coeffs[batch_index]
+                            * (base.1
+                                + left_eval_2 * right_q_eval_2
+                                + right_eval_2 * left_q_eval_2);
+                        evals.2 += coeffs[batch_index]
+                            * (base.2
+                                + left_eval_3 * right_q_eval_3
+                                + right_eval_3 * left_q_eval_3);
+                    }
+                }
 
                 evals.0 *= eq_evals.0;
                 evals.1 *= eq_evals.1;
@@ -634,7 +640,7 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, const C: usize> BatchedRati
 /// Represents a single layer of a single grand product circuit using a sparse vector,
 /// i.e. a vector containing (index, value) pairs.
 /// with values {p: 0, q: 1} omitted
-pub type SparseRationalSumLayer<F> = Vec<(usize, Pair<F>)>;
+pub type SparseRationalSumLayer<F> = Vec<(usize, F)>;
 
 /// A "dynamic density" grand product layer can switch from sparse representation
 /// to dense representation once it's no longer sparse (after binding).
@@ -669,27 +675,16 @@ impl<F: JoltField> DynamicDensityRationalSumLayer<F> {
         output_len: usize,
         memory_index: usize,
         preprocessing: &Vec<Vec<F>>,
-        preprocessing_next_layer: &Vec<Vec<F>>,
     ) -> Self {
         let subtable_index = memory_index / C;
-        let default = &preprocessing[subtable_index];
-        let get_default = |index| Pair {
-            p: F::zero(),
-            q: default[index],
-        };
+        let layer_q = &preprocessing[subtable_index];
 
         match self {
             DynamicDensityRationalSumLayer::Sparse(sparse_layer) => {
                 if (sparse_layer.len() as f64 / (output_len * 2) as f64) > DENSIFICATION_THRESHOLD {
                     // Current layer is already not very sparse, so make the next layer dense
-                    let mut output_layer: DenseRationalSumLayer<F> = preprocessing_next_layer
-                        [subtable_index]
-                        .iter()
-                        .map(|q| Pair {
-                            p: F::zero(),
-                            q: *q,
-                        })
-                        .collect();
+                    let mut output_layer: DenseRationalSumLayer<F> =
+                        vec![F::zero(); output_len];
                     let mut next_index_to_process = 0usize;
                     for (j, (index, value)) in sparse_layer.iter().enumerate() {
                         if *index < next_index_to_process {
@@ -701,19 +696,18 @@ impl<F: JoltField> DynamicDensityRationalSumLayer<F> {
                             let right = sparse_layer
                                 .get(j + 1)
                                 .cloned()
-                                .unwrap_or((index + 1, get_default(index + 1)));
+                                .unwrap_or((index + 1, F::zero()));
                             if right.0 == index + 1 {
-                                output_layer[index / 2] = Pair::rational_add(right.1, *value);
-                            } else {
                                 output_layer[index / 2] =
-                                    Pair::rational_add(get_default(index + 1), *value);
+                                    right.1 * layer_q[*index] + *value * layer_q[index + 1];
+                            } else {
+                                output_layer[index / 2] = *value * layer_q[index + 1];
                             }
                             next_index_to_process = index + 2;
                         } else {
                             // Right node; corresponding left node was not encountered in
                             // previous iteration
-                            output_layer[index / 2] =
-                                Pair::rational_add(get_default(index - 1), *value);
+                            output_layer[index / 2] = *value * layer_q[index - 1];
                             next_index_to_process = index + 1;
                         }
                     }
@@ -733,25 +727,22 @@ impl<F: JoltField> DynamicDensityRationalSumLayer<F> {
                             let right = sparse_layer
                                 .get(j + 1)
                                 .cloned()
-                                .unwrap_or((index + 1, get_default(index + 1)));
+                                .unwrap_or((index + 1, F::zero()));
                             if right.0 == index + 1 {
                                 // Corresponding right node was found; multiply them together
-                                output_layer.push((index / 2, Pair::rational_add(right.1, *value)));
-                            } else {
-                                // Corresponding right node not found
                                 output_layer.push((
                                     index / 2,
-                                    Pair::rational_add(get_default(index + 1), *value),
+                                    right.1 * layer_q[*index] + *value * layer_q[index + 1],
                                 ));
+                            } else {
+                                // Corresponding right node not found
+                                output_layer.push((index / 2, *value * layer_q[index + 1]));
                             }
                             next_index_to_process = index + 2;
                         } else {
                             // Right node; corresponding left node was not encountered in
                             // previous iteration
-                            output_layer.push((
-                                index / 2,
-                                Pair::rational_add(get_default(index - 1), *value),
-                            ));
+                            output_layer.push((index / 2, *value * layer_q[index - 1]));
                             next_index_to_process = index + 1;
                         }
                     }
@@ -759,18 +750,13 @@ impl<F: JoltField> DynamicDensityRationalSumLayer<F> {
                 }
             }
             DynamicDensityRationalSumLayer::Dense(dense_layer) => {
-                #[cfg(test)]
-                let product = dense_layer.iter().copied().reduce(Pair::rational_add);
-
                 // If current layer is dense, next layer should also be dense.
                 let output_layer: DenseRationalSumLayer<F> = (0..output_len)
-                    .map(|i| Pair::rational_add(dense_layer[2 * i], dense_layer[2 * i + 1]))
+                    .map(|i| {
+                        dense_layer[2 * i] * layer_q[2 * i + 1]
+                            + dense_layer[2 * i + 1] * layer_q[2 * i]
+                    })
                     .collect();
-                #[cfg(test)]
-                {
-                    let output_product = output_layer.iter().copied().reduce(Pair::rational_add);
-                    assert_eq!(product, output_product);
-                }
                 DynamicDensityRationalSumLayer::Dense(output_layer)
             }
         }
@@ -821,7 +807,8 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
     fn bind(&mut self, eq_poly: &mut DensePolynomial<F>, r: &F) {
         debug_assert!(self.layer_len % 4 == 0);
 
-        self.preprocessing_next = vec![vec![]; self.preprocessing.len()];
+        self.preprocessing_next =
+            vec![vec![F::zero(); self.layer_len / 2]; self.preprocessing.len()];
 
         rayon::join(
             || {
@@ -832,63 +819,35 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                 )
                     .into_par_iter()
                     .for_each(|(layers, preprocessing_next, preprocessing)| {
-                        let has_sparse = layers.iter().any(|layer| {
-                            if let DynamicDensityRationalSumLayer::Sparse(_) = layer {
-                                true
-                            } else {
-                                false
-                            }
-                        });
-                        if has_sparse {
-                            let n = preprocessing.len() / 4;
-                            *preprocessing_next = vec![F::zero(); preprocessing.len() / 2];
-                            for i in 0..n {
-                                // left
-                                preprocessing_next[2 * i] = preprocessing[4 * i]
-                                    + (preprocessing[4 * i + 2] - preprocessing[4 * i]) * *r;
-                                // right
-                                preprocessing_next[2 * i + 1] = preprocessing[4 * i + 1]
-                                    + (preprocessing[4 * i + 3] - preprocessing[4 * i + 1]) * *r;
-                            }
+                        for i in 0..preprocessing.len() / 4 {
+                            // left
+                            preprocessing_next[2 * i] = preprocessing[4 * i]
+                                + (preprocessing[4 * i + 2] - preprocessing[4 * i]) * *r;
+                            // right
+                            preprocessing_next[2 * i + 1] = preprocessing[4 * i + 1]
+                                + (preprocessing[4 * i + 3] - preprocessing[4 * i + 1]) * *r;
                         }
 
                         layers.iter_mut().for_each(|layer| match layer {
                             DynamicDensityRationalSumLayer::Sparse(sparse_layer) => {
-                                let default = &preprocessing;
-                                let get_default = |index| Pair {
-                                    p: F::zero(),
-                                    q: default[index],
-                                };
-
                                 let mut dense_bound_layer = if (sparse_layer.len() as f64
                                     / self.layer_len as f64)
                                     > DENSIFICATION_THRESHOLD
                                 {
                                     // Current layer is already not very sparse, so make the next layer dense
-                                    Some(
-                                        preprocessing_next
-                                            .iter()
-                                            .map(|x| Pair {
-                                                p: F::zero(),
-                                                q: *x,
-                                            })
-                                            .collect::<Vec<_>>(),
-                                    )
+                                    Some(vec![F::zero(); preprocessing_next.len()])
                                 } else {
                                     None
                                 };
 
                                 let mut num_bound = 0usize;
                                 let mut push_to_bound_layer =
-                                    |sparse_layer: &mut Vec<(usize, Pair<F>)>,
+                                    |sparse_layer: &mut Vec<(usize, F)>,
                                      dense_index: usize,
-                                     value: Pair<F>| {
+                                     value: F| {
                                         match &mut dense_bound_layer {
                                             Some(ref mut dense_vec) => {
-                                                debug_assert_eq!(
-                                                    dense_vec[dense_index].p,
-                                                    F::zero()
-                                                );
+                                                debug_assert_eq!(dense_vec[dense_index], F::zero());
                                                 dense_vec[dense_index] = value;
                                             }
                                             None => {
@@ -928,8 +887,7 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                                     match index % 4 {
                                         0 => {
                                             // Find sibling left node
-                                            let sibling_value =
-                                                neighbors[1].unwrap_or(get_default(index + 2));
+                                            let sibling_value = neighbors[1].unwrap_or(F::zero());
                                             push_to_bound_layer(
                                                 sparse_layer,
                                                 index / 2,
@@ -943,20 +901,17 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                                             // the monotonic ordering of the bound layer.
                                             if next_left_node_to_process <= index + 1 {
                                                 if let Some(left_neighbor) = neighbors[0] {
-                                                    let sibling_value = get_default(index - 1);
                                                     push_to_bound_layer(
                                                         sparse_layer,
                                                         index / 2,
-                                                        sibling_value
-                                                            + (left_neighbor - sibling_value) * *r,
+                                                        left_neighbor * *r,
                                                     );
                                                 }
                                                 next_left_node_to_process = index + 3;
                                             }
 
                                             // Find sibling right node
-                                            let sibling_value =
-                                                neighbors[1].unwrap_or(get_default(index + 2));
+                                            let sibling_value = neighbors[1].unwrap_or(F::zero());
                                             push_to_bound_layer(
                                                 sparse_layer,
                                                 index / 2 + 1,
@@ -967,22 +922,20 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                                         2 => {
                                             // Sibling left node wasn't encountered in previous iteration,
                                             // so sibling must have value 1.
-                                            let sibling_value = get_default(index - 2);
                                             push_to_bound_layer(
                                                 sparse_layer,
                                                 index / 2 - 1,
-                                                sibling_value + (value - sibling_value) * *r,
+                                                value * *r,
                                             );
                                             next_left_node_to_process = index + 2;
                                         }
                                         3 => {
                                             // Sibling right node wasn't encountered in previous iteration,
                                             // so sibling must have value 1.
-                                            let sibling_value = get_default(index - 2);
                                             push_to_bound_layer(
                                                 sparse_layer,
                                                 index / 2,
-                                                sibling_value + (value - sibling_value) * *r,
+                                                value * *r,
                                             );
                                             next_right_node_to_process = index + 2;
                                         }
@@ -1040,9 +993,6 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
         previous_round_claim: F,
         lambda: &F,
     ) -> UniPoly<F> {
-        let inner_func = |left: Pair<F>, right: Pair<F>| {
-            right.p * left.q + (left.p + left.q * *lambda) * right.q
-        };
         let inner_func_delta = |left: Pair<F>, right: Pair<F>| right.p * left.q + left.p * right.q;
 
         // Maybe into_par_iter this; but I found that it causes too much overhead
@@ -1063,31 +1013,27 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
         )
             .into_par_iter()
             .map(|(layers, coeffs, preprocessing)| {
-                let default_sum = if preprocessing.len() != 0 {
-                    let mut sum = (F::zero(), F::zero(), F::zero());
-                    for i in 0..preprocessing.len() / 4 {
-                        let (eq_eval_0, eq_eval_2, eq_eval_3) = eq_evals[i];
+                let mut sum = (F::zero(), F::zero(), F::zero());
+                for i in 0..preprocessing.len() / 4 {
+                    let (eq_eval_0, eq_eval_2, eq_eval_3) = eq_evals[i];
 
-                        let left = (preprocessing[4 * i], preprocessing[4 * i + 2]);
-                        let right = (preprocessing[4 * i + 1], preprocessing[4 * i + 3]);
+                    let left = (preprocessing[4 * i], preprocessing[4 * i + 2]);
+                    let right = (preprocessing[4 * i + 1], preprocessing[4 * i + 3]);
 
-                        let m_left = left.1 - left.0;
-                        let m_right = right.1 - right.0;
+                    let m_left = left.1 - left.0;
+                    let m_right = right.1 - right.0;
 
-                        let left_eval_2 = left.1 + m_left;
-                        let left_eval_3 = left_eval_2 + m_left;
+                    let left_eval_2 = left.1 + m_left;
+                    let left_eval_3 = left_eval_2 + m_left;
 
-                        let right_eval_2 = right.1 + m_right;
-                        let right_eval_3 = right_eval_2 + m_right;
+                    let right_eval_2 = right.1 + m_right;
+                    let right_eval_3 = right_eval_2 + m_right;
 
-                        sum.0 += eq_eval_0 * left.0 * right.0;
-                        sum.1 += eq_eval_2 * left_eval_2 * right_eval_2;
-                        sum.2 += eq_eval_3 * left_eval_3 * right_eval_3;
-                    }
-                    (sum.0 * *lambda, sum.1 * *lambda, sum.2 * *lambda)
-                } else {
-                    (F::zero(), F::zero(), F::zero())
-                };
+                    sum.0 += eq_eval_0 * left.0 * right.0;
+                    sum.1 += eq_eval_2 * left_eval_2 * right_eval_2;
+                    sum.2 += eq_eval_3 * left_eval_3 * right_eval_3;
+                }
+                let default_sum = (sum.0 * *lambda, sum.1 * *lambda, sum.2 * *lambda);
 
                 let mut total_eval = (F::zero(), F::zero(), F::zero());
                 zip(layers, coeffs).for_each(|(layer, coeff)| match layer {
@@ -1104,12 +1050,11 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                     //    coeff[batch_index] * (eq_eval_sum + ∆)
                     // ...which is exactly the summand we want.
                     DynamicDensityRationalSumLayer::Sparse(sparse_layer) => {
-                        let default = &preprocessing;
-                        let get_default = |index| Pair {
+                        let layer_q = preprocessing;
+                        let get_default = |i| Pair {
                             p: F::zero(),
-                            q: default[index],
+                            q: layer_q[i],
                         };
-
                         // Computes:
                         //     ∆ := Σ eq_evals[j] * (left[j] * right[j] - 1)    ∀j where left[j] ≠ 1 or right[j] ≠ 1
                         // for the evaluation points {0, 2, 3}
@@ -1138,15 +1083,15 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                                 }
                             }
                             for k in 0..3 {
-                                if index + k + 1 >= default.len() {
-                                    break;
-                                }
                                 if neighbors[k] == None {
-                                    neighbors[k] = Some(get_default(index + k + 1));
+                                    neighbors[k] = Some(F::zero());
                                 }
                             }
 
-                            let find_neighbor = |i: usize| neighbors[i - index - 1].unwrap();
+                            let find_neighbor = |i: usize| Pair {
+                                p: neighbors[i - index - 1].unwrap(),
+                                q: layer_q[i],
+                            };
 
                             // Recall that in the dense case, we process four values at a time:
                             //                  layer = [L, R, L, R, L, R, ...]
@@ -1158,9 +1103,13 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                             // values may be omitted from the sparse vector.
                             // We match on `index % 4` to determine which of the four values are
                             // present in the sparse vector, and infer the rest are 1.
+                            let value = Pair {
+                                p: *value,
+                                q: layer_q[*index],
+                            };
                             let (left, right) = match index % 4 {
                                 0 => {
-                                    let left = (*value, find_neighbor(index + 2));
+                                    let left = (value, find_neighbor(index + 2));
                                     let right =
                                         (find_neighbor(index + 1), find_neighbor(index + 3));
                                     next_index_to_process = index + 4;
@@ -1168,19 +1117,19 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                                 }
                                 1 => {
                                     let left = (get_default(index - 1), find_neighbor(index + 1));
-                                    let right = (*value, find_neighbor(index + 2));
+                                    let right = (value, find_neighbor(index + 2));
                                     next_index_to_process = index + 3;
                                     (left, right)
                                 }
                                 2 => {
-                                    let left = (get_default(index - 2), *value);
+                                    let left = (get_default(index - 2), value);
                                     let right = (get_default(index - 1), find_neighbor(index + 1));
                                     next_index_to_process = index + 2;
                                     (left, right)
                                 }
                                 3 => {
                                     let left = (get_default(index - 3), get_default(index - 1));
-                                    let right = (get_default(index - 2), *value);
+                                    let right = (get_default(index - 2), value);
                                     next_index_to_process = index + 1;
                                     (left, right)
                                 }
@@ -1213,15 +1162,17 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                     //     Σ coeff[batch_index] * (Σ eq_evals[i] * left[i] * right[i])
                     // directly in `self.compute_cubic`, without using `eq_eval_sums`.
                     DynamicDensityRationalSumLayer::Dense(dense_layer) => {
+                        let layer_q = preprocessing;
                         // Computes:
                         //     coeff[batch_index] * (Σ eq_evals[i] * left[i] * right[i])
                         // for the evaluation points {0, 2, 3}
                         let evals = eq_evals
                             .iter()
                             .zip(dense_layer.chunks_exact(4))
-                            .map(|(eq_evals, chunk)| {
-                                let left = (chunk[0], chunk[2]);
-                                let right = (chunk[1], chunk[3]);
+                            .enumerate()
+                            .map(|(i, (eq_evals, chunk))| {
+                                let left = (Pair{p: chunk[0], q: layer_q[4 * i]}, Pair{p: chunk[2], q: layer_q[4 * i + 2]});
+                                let right = (Pair{p: chunk[1], q: layer_q[4 * i + 1]}, Pair{p: chunk[3], q: layer_q[4 * i + 3]});
 
                                 let m_left = left.1 - left.0;
                                 let m_right = right.1 - right.0;
@@ -1233,13 +1184,13 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                                 let right_eval_3 = right_eval_2 + m_right;
 
                                 (
-                                    eq_evals.0 * inner_func(left.0, right.0),
-                                    eq_evals.1 * inner_func(left_eval_2, right_eval_2),
-                                    eq_evals.2 * inner_func(left_eval_3, right_eval_3),
+                                    eq_evals.0 * inner_func_delta(left.0, right.0),
+                                    eq_evals.1 * inner_func_delta(left_eval_2, right_eval_2),
+                                    eq_evals.2 * inner_func_delta(left_eval_3, right_eval_3),
                                 )
                             })
                             .fold(
-                                (F::zero(), F::zero(), F::zero()),
+                                default_sum,
                                 |(sum_0, sum_2, sum_3), (a, b, c)| {
                                     (sum_0 + a, sum_2 + b, sum_3 + c)
                                 },
@@ -1274,28 +1225,29 @@ impl<F: JoltField, const C: usize> BatchedCubicSumcheckRationalSum<F, Pair<F>>
                 DynamicDensityRationalSumLayer::Sparse(layer) => {
                     let subtable_index = Self::memory_to_subtable_index(batch_index);
 
-                    let default = &self.preprocessing[subtable_index];
-                    let get_default = |index| Pair {
-                        p: F::zero(),
-                        q: default[index],
-                    };
+                    let layer_q = &self.preprocessing[subtable_index];
+                    let get_default = |i| Pair {p: F::zero(), q: layer_q[i]};
 
                     match layer.len() {
                         0 => (get_default(0), get_default(1)), // Neither left nor right claim is present, so they must both be 1
                         1 => {
                             if layer[0].0.is_zero() {
                                 // Only left claim is present, so right claim must be 1
-                                (layer[0].1, get_default(1))
+                                (Pair{p: layer[0].1, q: layer_q[0]}, get_default(1))
                             } else {
                                 // Only right claim is present, so left claim must be 1
-                                (get_default(0), layer[0].1)
+                                (get_default(0), Pair{p: layer[0].1, q: layer_q[1]})
                             }
                         }
-                        2 => (layer[0].1, layer[1].1), // Both left and right claim are present
+                        2 => (Pair{p: layer[0].1, q: layer_q[0]}, Pair{p: layer[1].1, q: layer_q[1]}), // Both left and right claim are present
                         _ => panic!("Sparse layer length > 2"),
                     }
                 }
-                DynamicDensityRationalSumLayer::Dense(layer) => (layer[0], layer[1]),
+                DynamicDensityRationalSumLayer::Dense(layer) => {
+                    let subtable_index = Self::memory_to_subtable_index(batch_index);
+                    let layer_q = &self.preprocessing[subtable_index];
+                    (Pair{p: layer[0], q: layer_q[0]}, Pair{p: layer[1], q: layer_q[1]})
+                }
             })
             .unzip()
     }
@@ -1357,17 +1309,13 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, const C: usize> BatchedRati
             layers: (0..num_subtables * C)
                 .into_par_iter()
                 .map(|batch_index| {
-                    let subtable_index = batch_index / C;
                     let dimension_index = batch_index % C;
                     DynamicDensityRationalSumLayer::Sparse(
                         zip(&indices_p[dimension_index], &values_p[dimension_index])
                             .map(|(index, p)| {
                                 (
                                     *index,
-                                    Pair {
-                                        p: *p,
-                                        q: preprocessings[0][subtable_index][*index],
-                                    },
+                                    *p
                                 )
                             })
                             .collect(),
@@ -1390,7 +1338,6 @@ impl<F: JoltField, PCS: CommitmentScheme<Field = F>, const C: usize> BatchedRati
                         len,
                         memory_index,
                         &previous_layers.preprocessing,
-                        &preprocessings[i + 1],
                     )
                 })
                 .collect();
