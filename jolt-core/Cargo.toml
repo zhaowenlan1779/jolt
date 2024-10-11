@@ -93,6 +93,11 @@ harness = false
 name = "commit"
 harness = false
 
+[[bench]]
+name = "pcs-benches"
+path = "src/benches/pcs_bench.rs"
+harness = false
+
 [lib]
 name = "jolt_core"
 path = "src/lib.rs"
