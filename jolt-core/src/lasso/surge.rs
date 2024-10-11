@@ -35,7 +35,6 @@ where
 {
     _marker: PhantomData<PCS>,
     pub dim: Vec<DensePolynomial<F>>,     // Size C
-    pub T_polys: Vec<DensePolynomial<F>>, // Size NUM_MEMORIES
     pub E_polys: Vec<DensePolynomial<F>>, // Size NUM_MEMORIES
     pub m: Vec<DensePolynomial<F>>,       // Size C
 
@@ -671,6 +670,7 @@ where
                     Some(generators),
                 );
 
+
                         proof.f_openings.verify_openings(
                             generators,
                             &proof.f_openings_proof,
@@ -950,7 +950,6 @@ where
         let mut dim_poly = vec![];
         let mut m_poly = vec![];
         let mut E_poly = vec![];
-        let mut T_poly = vec![];
         rayon::scope(|s| {
             s.spawn(|_| {
                 (m_indices, m_values) = m_evals
@@ -992,19 +991,11 @@ where
                 }
                 E_poly = Self::polys_from_evals(&E_i_evals);
             });
-            s.spawn(|_| {
-                T_poly = preprocessing
-                    .materialized_subtables
-                    .iter()
-                    .map(|subtable| DensePolynomial::new(subtable.to_vec()))
-                    .collect::<Vec<_>>();
-            });
         });
 
         SurgePolysPrimary {
             _marker: PhantomData,
             dim: dim_poly,
-            T_polys: T_poly,
             E_polys: E_poly,
             m: m_poly,
             m_indices,
