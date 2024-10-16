@@ -7,20 +7,32 @@
 use ark_bn254::{Bn254, Fr, G1Projective};
 use ark_ff::UniformRand;
 use ark_std::rand::SeedableRng;
-use jolt_core::{field::JoltField, poly::{commitment::{commitment_scheme::{BatchType, CommitShape, CommitmentScheme}, hyperkzg::HyperKZG, hyrax::HyraxScheme, zeromorph::Zeromorph}, dense_mlpoly::DensePolynomial},
-utils::{errors::ProofVerifyError, transcript::ProofTranscript}};
+use jolt_core::{
+    field::JoltField,
+    poly::{
+        commitment::{
+            commitment_scheme::{BatchType, CommitShape, CommitmentScheme},
+            hyperkzg::HyperKZG,
+            hyrax::HyraxScheme,
+            zeromorph::Zeromorph,
+        },
+        dense_mlpoly::DensePolynomial,
+    },
+    utils::{errors::ProofVerifyError, transcript::ProofTranscript},
+};
 use std::time::Instant;
 
 fn main() {
-    bench_pcs::<Fr, HyperKZG<Bn254>>("HyperKZG", 24).unwrap();
-    bench_pcs::<Fr, HyraxScheme<G1Projective>>("Hyrax", 24).unwrap();
-    bench_pcs::<Fr, Zeromorph<Bn254>>("Zeromorph", 24).unwrap();
+    bench_batch_commit::<Fr, HyperKZG<Bn254>>("HyperKZG", 24).unwrap();
+    bench_batch_commit::<Fr, HyraxScheme<G1Projective>>("Hyrax", 24).unwrap();
+    bench_batch_commit::<Fr, Zeromorph<Bn254>>("Zeromorph", 24).unwrap();
+
+    // bench_pcs::<Fr, HyperKZG<Bn254>>("HyperKZG", 24).unwrap();
+    // bench_pcs::<Fr, HyraxScheme<G1Projective>>("Hyrax", 24).unwrap();
+    // bench_pcs::<Fr, Zeromorph<Bn254>>("Zeromorph", 24).unwrap();
 }
 
-fn bench_pcs<
-    F: JoltField + UniformRand,
-    PCS: CommitmentScheme<Field = F>,
->(
+fn bench_pcs<F: JoltField + UniformRand, PCS: CommitmentScheme<Field = F>>(
     name: &str,
     supported_nv: usize,
 ) -> Result<(), ProofVerifyError> {
@@ -93,6 +105,52 @@ fn bench_pcs<
                 start.elapsed().as_nanos() / repetition as u128
             );
         }
+
+        println!("====================================");
+    }
+
+    Ok(())
+}
+
+fn bench_batch_commit<F: JoltField + UniformRand, PCS: CommitmentScheme<Field = F>>(
+    name: &str,
+    supported_nv: usize,
+) -> Result<(), ProofVerifyError> {
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(69420u64);
+
+    // normal polynomials
+    let setup = PCS::setup(&[CommitShape::new(1 << supported_nv, BatchType::Small)]);
+
+    for nv in [20, 22, 24] {
+        let repetition = if nv < 10 {
+            10
+        } else if nv < 20 {
+            5
+        } else {
+            2
+        };
+
+        let polys = (0..3)
+            .map(|_| DensePolynomial::random(nv, &mut rng))
+            .collect::<Vec<_>>();
+        let leaves = polys.iter().map(|poly| &poly.Z[..]).collect::<Vec<_>>();
+
+        let point: Vec<_> = (0..nv).map(|_| F::rand(&mut rng)).collect();
+
+        // commit
+        let com = {
+            let start = Instant::now();
+            for _ in 0..repetition {
+                let _commit = PCS::batch_commit(&leaves, &setup, BatchType::Small);
+            }
+
+            println!(
+                "{} commit for {} variables: {} ns",
+                name,
+                nv,
+                start.elapsed().as_nanos() / repetition as u128
+            );
+        };
 
         println!("====================================");
     }
