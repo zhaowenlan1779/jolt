@@ -1,19 +1,27 @@
 use crate::field::JoltField;
 use crate::host;
+use crate::jolt::instruction::xor::XORInstruction;
 use crate::jolt::vm::rv32i_vm::{RV32IJoltVM, C, M};
 use crate::jolt::vm::Jolt;
+use crate::lasso::surge::{SurgePreprocessing, SurgeProof};
 use crate::poly::commitment::commitment_scheme::CommitmentScheme;
 use crate::poly::commitment::hyperkzg::HyperKZG;
 use crate::poly::commitment::hyrax::HyraxScheme;
+use crate::poly::commitment::mock::MockCommitScheme;
 use crate::poly::commitment::zeromorph::Zeromorph;
+use crate::utils::transcript::ProofTranscript;
 use ark_bn254::{Bn254, Fr, G1Projective};
+use ark_std::test_rng;
+use rand_core::RngCore;
 use serde::Serialize;
+use std::time::Instant;
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
 pub enum PCSType {
     Hyrax,
     Zeromorph,
     HyperKZG,
+    Mock,
 }
 
 #[derive(Debug, Copy, Clone, clap::ValueEnum)]
@@ -54,6 +62,13 @@ pub fn benchmarks(
             BenchType::Fibonacci => fibonacci::<Fr, HyperKZG<Bn254>>(),
             _ => panic!("BenchType does not have a mapping"),
         },
+        PCSType::Mock => match bench_type {
+            BenchType::Sha2 => sha2::<Fr, MockCommitScheme<Fr>>(),
+            BenchType::Sha3 => sha3::<Fr, MockCommitScheme<Fr>>(),
+            BenchType::Sha2Chain => sha2chain::<Fr, MockCommitScheme<Fr>>(),
+            BenchType::Fibonacci => fibonacci::<Fr, MockCommitScheme<Fr>>(),
+            _ => panic!("BenchType does not have a mapping"),
+        },
         _ => panic!("PCS Type does not have a mapping"),
     }
 }
@@ -88,9 +103,7 @@ fn serialize_and_print_size(name: &str, item: &impl ark_serialize::CanonicalSeri
     let mut file = File::create("temp_file").unwrap();
     item.serialize_compressed(&mut file).unwrap();
     let file_size_bytes = file.metadata().unwrap().len();
-    let file_size_kb = file_size_bytes as f64 / 1024.0;
-    let file_size_mb = file_size_kb / 1024.0;
-    println!("{:<30} : {:.3} MB", name, file_size_mb);
+    println!("{:<30} : {} bytes", name, file_size_bytes);
 }
 
 fn prove_example<T: Serialize, PCS, F>(
@@ -102,41 +115,84 @@ where
     PCS: CommitmentScheme<Field = F>,
 {
     let mut tasks = Vec::new();
-    let mut program = host::Program::new(example_name);
-    program.set_input(input);
+    // let mut program = host::Program::new(example_name);
+    // program.set_input(input);
 
     let task = move || {
-        let (bytecode, memory_init) = program.decode();
-        let (io_device, trace) = program.trace();
+        for nv in 20..=24 {
+            let num_ops = 1 << nv;
+            let preprocessing = SurgePreprocessing::preprocess();
 
-        let preprocessing: crate::jolt::vm::JoltPreprocessing<C, F, PCS> =
-            RV32IJoltVM::preprocess(bytecode.clone(), memory_init, 1 << 20, 1 << 20, 1 << 22);
+            let func = |_| {
+                let mut rng = test_rng();
+                const C: usize = 4;
+                const M: usize = 1 << 16;
+                let operand_size = (M * M) as u64;
+                let ops = std::iter::repeat_with(|| {
+                    XORInstruction(
+                        (rng.next_u32() as u64) % operand_size,
+                        (rng.next_u32() as u64) % operand_size,
+                    )
+                })
+                .take(num_ops)
+                .collect::<Vec<_>>();
 
-        let (jolt_proof, jolt_commitments, _) =
-            <RV32IJoltVM as Jolt<_, PCS, C, M>>::prove(io_device, trace, preprocessing.clone());
+                SurgeProof::<F, MockCommitScheme<F>, XORInstruction<32>, C, M>::prove(
+                    &preprocessing,
+                    &(),
+                    ops,
+                )
+            };
 
-        println!("Proof sizing:");
-        serialize_and_print_size("jolt_commitments", &jolt_commitments);
-        serialize_and_print_size("jolt_proof", &jolt_proof);
-        serialize_and_print_size(" jolt_proof.r1cs", &jolt_proof.r1cs);
-        serialize_and_print_size(" jolt_proof.bytecode", &jolt_proof.bytecode);
-        serialize_and_print_size(
-            " jolt_proof.read_write_memory",
-            &jolt_proof.read_write_memory,
-        );
-        serialize_and_print_size(
-            " jolt_proof.instruction_lookups",
-            &jolt_proof.instruction_lookups,
-        );
+            let before = Instant::now();
+            (0..10).for_each(|i| {
+                func(i);
+            });
+            println!(
+                "prover time for {}: {} us",
+                nv,
+                before.elapsed().as_micros() / 10
+            );
 
-        let verification_result =
-            RV32IJoltVM::verify(preprocessing, jolt_proof, jolt_commitments, None);
-        assert!(
-            verification_result.is_ok(),
-            "Verification failed with error: {:?}",
-            verification_result.err()
-        );
+            let (proof, _) = func(0);
+            println!("Proof sizing for {}:", nv);
+            // serialize_and_print_size("jolt_commitments", &jolt_commitments);
+            serialize_and_print_size("proof", &proof);
+
+            for i in 0..50 {
+                SurgeProof::verify(&preprocessing, &(), proof.clone(), None).expect("should work");
+            }
+            println!(
+                "verifier time for {}: {} us",
+                nv,
+                before.elapsed().as_micros() / 50
+            );
+        }
     };
+
+    // let task = move || {
+    //     let (bytecode, memory_init) = program.decode();
+    //     let (io_device, trace, circuit_flags) = program.trace();
+
+    //     let preprocessing: crate::jolt::vm::JoltPreprocessing<F, PCS> =
+    //         RV32IJoltVM::preprocess(bytecode.clone(), memory_init, 1 << 20, 1 << 20, 1 << 22);
+
+    //     let (jolt_proof, jolt_commitments) = <RV32IJoltVM as Jolt<_, PCS, C, M>>::prove(
+    //         io_device,
+    //         trace,
+    //         circuit_flags,
+    //         preprocessing.clone(),
+    //     );
+
+    //     let verification_result = RV32IJoltVM::verify(preprocessing, jolt_proof, jolt_commitments);
+    //     assert!(
+    //         verification_result.is_ok(),
+    //         "Verification failed with error: {:?}",
+    //         verification_result.err()
+    //     );
+    // };
+
+    task();
 
     tasks.push((
         tracing::info_span!("Example_E2E"),

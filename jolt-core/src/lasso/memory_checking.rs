@@ -21,7 +21,7 @@ use itertools::interleave;
 use rayon::prelude::*;
 use std::iter::zip;
 
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct MultisetHashes<F: JoltField> {
     /// Multiset hash of "read" tuples
     pub read_hashes: Vec<F>,
@@ -42,13 +42,13 @@ impl<F: JoltField> MultisetHashes<F> {
     }
 }
 
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct MemoryCheckingProof<F, PCS, Openings, OtherOpenings>
 where
     F: JoltField,
     PCS: CommitmentScheme<Field = F>,
-    Openings: StructuredPolynomialData<F> + Sync + CanonicalSerialize + CanonicalDeserialize,
-    OtherOpenings: ExogenousOpenings<F> + Sync,
+    Openings: StructuredPolynomialData<F> + Sync + CanonicalSerialize + CanonicalDeserialize + Clone,
+    OtherOpenings: ExogenousOpenings<F> + Sync + Clone,
 {
     /// Read/write/init/final multiset hashes for each memory
     pub multiset_hashes: MultisetHashes<F>,
@@ -126,7 +126,7 @@ pub trait ExogenousOpenings<F: JoltField>:
     ) -> Vec<&T>;
 }
 
-#[derive(Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Default, CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct NoExogenousOpenings;
 impl<F: JoltField> ExogenousOpenings<F> for NoExogenousOpenings {
     fn openings(&self) -> Vec<&F> {
@@ -210,9 +210,9 @@ where
         BatchedDenseGrandProduct<F>;
 
     type Polynomials: StructuredPolynomialData<DensePolynomial<F>>;
-    type Openings: StructuredPolynomialData<F> + Sync + Initializable<F, Self::Preprocessing>;
+    type Openings: StructuredPolynomialData<F> + Sync + Initializable<F, Self::Preprocessing> + Clone;
     type Commitments: StructuredPolynomialData<PCS::Commitment>;
-    type ExogenousOpenings: ExogenousOpenings<F> + Sync = NoExogenousOpenings;
+    type ExogenousOpenings: ExogenousOpenings<F> + Sync + Clone = NoExogenousOpenings;
 
     type Preprocessing = NoPreprocessing;
 

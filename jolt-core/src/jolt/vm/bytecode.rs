@@ -27,7 +27,7 @@ use crate::{
 
 use super::{JoltPolynomials, JoltTraceStep};
 
-#[derive(Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Default, CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct BytecodeStuff<T: CanonicalSerialize + CanonicalDeserialize> {
     /// Read/write addresses for offline memory-checking.
     /// For offline memory-checking, each read is paired with a "virtual" write,

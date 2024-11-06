@@ -27,7 +27,7 @@ use super::memory_checking::{
     Initializable, NoExogenousOpenings, StructuredPolynomialData, VerifierComputedOpening,
 };
 
-#[derive(Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Default, CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct SurgeStuff<T: CanonicalSerialize + CanonicalDeserialize> {
     /// C-sized vector of `dim_i` polynomials/commitments/openings
     pub(crate) dim: Vec<T>,
@@ -278,6 +278,7 @@ where
     }
 }
 
+#[derive(CanonicalDeserialize, CanonicalSerialize, Clone)]
 pub struct SurgePrimarySumcheck<F>
 where
     F: JoltField,
@@ -298,6 +299,7 @@ where
 }
 
 #[allow(clippy::type_complexity)]
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct SurgeProof<F, PCS, Instruction, const C: usize, const M: usize>
 where
     F: JoltField,

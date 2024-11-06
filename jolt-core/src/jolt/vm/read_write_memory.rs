@@ -105,7 +105,7 @@ const RAM_2_INDEX: usize = RAM_2 - 3;
 const RAM_3_INDEX: usize = RAM_3 - 3;
 const RAM_4_INDEX: usize = RAM_4 - 3;
 
-#[derive(Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Default, CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct ReadWriteMemoryStuff<T: CanonicalSerialize + CanonicalDeserialize> {
     /// Read/write addresses. For offline memory checking, each read is paired with a "virtual" write
     /// and vice versa, so the read addresses and write addresses are the same.
@@ -186,7 +186,7 @@ impl<T: CanonicalSerialize + CanonicalDeserialize + Default>
 {
 }
 
-#[derive(Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Default, CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct RegisterAddressOpenings<F: JoltField> {
     pub a_rd: F,
     pub a_rs1: F,

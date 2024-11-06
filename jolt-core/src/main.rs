@@ -22,6 +22,7 @@ struct Cli {
 #[derive(Subcommand, Debug)]
 enum Commands {
     Trace(TraceArgs),
+    Bench,
 }
 
 #[derive(Args, Debug)]
@@ -78,6 +79,9 @@ fn main() {
     let cli = Cli::parse();
     match cli.command {
         Commands::Trace(args) => trace(args),
+        Commands::Bench => {
+            benchmarks(PCSType::Mock, BenchType::Fibonacci, None, None, None);
+        }
     }
 }
 

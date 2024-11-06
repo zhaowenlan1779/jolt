@@ -34,7 +34,7 @@ use crate::{
 
 use super::{JoltCommitments, JoltPolynomials, JoltTraceStep};
 
-#[derive(Debug, Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Debug, Default, CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct InstructionLookupStuff<T: CanonicalSerialize + CanonicalDeserialize> {
     /// `C`-sized vector of polynomials/commitments/openings corresponding to the
     /// indices at which subtables are queried.

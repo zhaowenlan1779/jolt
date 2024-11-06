@@ -42,6 +42,7 @@ pub trait CommitmentScheme: Clone + Sync + Send + 'static {
         + Sync
         + Send
         + PartialEq
+        + Clone
         + CanonicalSerialize
         + CanonicalDeserialize
         + AppendToTranscript;

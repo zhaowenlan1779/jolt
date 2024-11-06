@@ -30,7 +30,7 @@ use crate::{
 
 use super::{JoltCommitments, JoltPolynomials, JoltStuff};
 
-#[derive(Default, CanonicalSerialize, CanonicalDeserialize)]
+#[derive(Default, CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct TimestampRangeCheckStuff<T: CanonicalSerialize + CanonicalDeserialize + Sync> {
     read_cts_read_timestamp: [T; MEMORY_OPS_PER_INSTRUCTION],
     read_cts_global_minus_read: [T; MEMORY_OPS_PER_INSTRUCTION],

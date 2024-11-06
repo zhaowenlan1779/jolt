@@ -492,7 +492,7 @@ impl<F: JoltField> SumcheckInstanceProof<F> {
     }
 }
 
-#[derive(CanonicalSerialize, CanonicalDeserialize, Debug)]
+#[derive(CanonicalSerialize, CanonicalDeserialize, Debug, Clone)]
 pub struct SumcheckInstanceProof<F: JoltField> {
     pub compressed_polys: Vec<CompressedUniPoly<F>>,
 }

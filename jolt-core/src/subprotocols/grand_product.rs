@@ -13,7 +13,7 @@ use ark_serialize::*;
 use itertools::Itertools;
 use rayon::prelude::*;
 
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct BatchedGrandProductLayerProof<F: JoltField> {
     pub proof: SumcheckInstanceProof<F>,
     pub left_claims: Vec<F>,
@@ -34,7 +34,7 @@ impl<F: JoltField> BatchedGrandProductLayerProof<F> {
     }
 }
 
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct BatchedGrandProductProof<PCS: CommitmentScheme> {
     pub layers: Vec<BatchedGrandProductLayerProof<PCS::Field>>,
     pub quark_proof: Option<QuarkGrandProductProof<PCS>>,

@@ -16,7 +16,7 @@ use itertools::Itertools;
 use rayon::prelude::*;
 use thiserror::Error;
 
-#[derive(CanonicalSerialize, CanonicalDeserialize)]
+#[derive(CanonicalSerialize, CanonicalDeserialize, Clone)]
 pub struct QuarkGrandProductProof<PCS: CommitmentScheme> {
     sumcheck_proof: SumcheckInstanceProof<PCS::Field>,
     g_commitment: Vec<PCS::Commitment>,
