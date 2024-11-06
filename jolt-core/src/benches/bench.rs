@@ -159,6 +159,7 @@ where
             // serialize_and_print_size("jolt_commitments", &jolt_commitments);
             serialize_and_print_size("proof", &proof);
 
+            let before = Instant::now();
             for i in 0..50 {
                 SurgeProof::verify(&preprocessing, &(), proof.clone(), None).expect("should work");
             }
