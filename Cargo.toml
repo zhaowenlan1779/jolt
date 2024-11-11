@@ -79,9 +79,8 @@ opt-level = 3
 lto = "off"
 
 [profile.release]
-debug = 1
-codegen-units = 1
 lto = "fat"
+panic = "abort"
 
 [profile.build-fast]
 inherits = "release"
@@ -93,6 +92,8 @@ inherits = "release"
 debug = false
 
 [patch.crates-io]
-ark-ff = { git = "https://github.com/a16z/arkworks-algebra", branch = "optimize/field-from-u64" }
-ark-ec = { git = "https://github.com/a16z/arkworks-algebra", branch = "optimize/field-from-u64" }
-ark-serialize = { git = "https://github.com/a16z/arkworks-algebra", branch = "optimize/field-from-u64" }
+ark-ff = { git = "https://github.com/zhaowenlan1779/algebra", branch = "optimize" }
+ark-ec = { git = "https://github.com/zhaowenlan1779/algebra", branch = "optimize" }
+ark-serialize = { git = "https://github.com/zhaowenlan1779/algebra", branch = "optimize" }
+ark-bn254 = { git = "https://github.com/zhaowenlan1779/curves", branch = "optimize" }
+

@@ -4,7 +4,7 @@ use crate::jolt::instruction::xor::XORInstruction;
 use crate::jolt::vm::rv32i_vm::{RV32IJoltVM, C, M};
 use crate::jolt::vm::Jolt;
 use crate::lasso::surge::{SurgePreprocessing, SurgeProof};
-use crate::poly::commitment::commitment_scheme::CommitmentScheme;
+use crate::poly::commitment::commitment_scheme::{BatchType, CommitShape, CommitmentScheme};
 use crate::poly::commitment::hyperkzg::HyperKZG;
 use crate::poly::commitment::hyrax::HyraxScheme;
 use crate::poly::commitment::mock::MockCommitScheme;
@@ -63,10 +63,10 @@ pub fn benchmarks(
             _ => panic!("BenchType does not have a mapping"),
         },
         PCSType::Mock => match bench_type {
-            BenchType::Sha2 => sha2::<Fr, MockCommitScheme<Fr>>(),
-            BenchType::Sha3 => sha3::<Fr, MockCommitScheme<Fr>>(),
-            BenchType::Sha2Chain => sha2chain::<Fr, MockCommitScheme<Fr>>(),
-            BenchType::Fibonacci => fibonacci::<Fr, MockCommitScheme<Fr>>(),
+            BenchType::Sha2 => sha2::<Fr, MockCommitScheme<Bn254>>(),
+            BenchType::Sha3 => sha3::<Fr, MockCommitScheme<Bn254>>(),
+            BenchType::Sha2Chain => sha2chain::<Fr, MockCommitScheme<Bn254>>(),
+            BenchType::Fibonacci => fibonacci::<Fr, MockCommitScheme<Bn254>>(),
             _ => panic!("BenchType does not have a mapping"),
         },
         _ => panic!("PCS Type does not have a mapping"),
@@ -119,10 +119,13 @@ where
     // program.set_input(input);
 
     let task = move || {
+        let generators = PCS::setup(&[CommitShape {
+            input_length: 1 << 24,
+            batch_type: BatchType::Big,
+        }]);
         for nv in 20..=24 {
             let num_ops = 1 << nv;
             let preprocessing = SurgePreprocessing::preprocess();
-
             let func = |_| {
                 let mut rng = test_rng();
                 const C: usize = 4;
@@ -137,9 +140,9 @@ where
                 .take(num_ops)
                 .collect::<Vec<_>>();
 
-                SurgeProof::<F, MockCommitScheme<F>, XORInstruction<32>, C, M>::prove(
+                SurgeProof::<F, PCS, XORInstruction<32>, C, M>::prove(
                     &preprocessing,
-                    &(),
+                    &generators,
                     ops,
                 )
             };
@@ -161,7 +164,7 @@ where
 
             let before = Instant::now();
             for i in 0..50 {
-                SurgeProof::verify(&preprocessing, &(), proof.clone(), None).expect("should work");
+                SurgeProof::verify(&preprocessing, &generators, proof.clone(), None).expect("should work");
             }
             println!(
                 "verifier time for {}: {} us",
