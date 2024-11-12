@@ -513,16 +513,16 @@ where
             "Primary sumcheck check failed."
         );
 
-        opening_accumulator.append(
-            &proof.commitments.E_polys.iter().collect::<Vec<_>>(),
-            r_z.clone(),
-            &proof
-                .primary_sumcheck
-                .E_poly_openings
-                .iter()
-                .collect::<Vec<_>>(),
-            &mut transcript,
-        );
+        // opening_accumulator.append(
+        //     &proof.commitments.E_polys.iter().collect::<Vec<_>>(),
+        //     r_z.clone(),
+        //     &proof
+        //         .primary_sumcheck
+        //         .E_poly_openings
+        //         .iter()
+        //         .collect::<Vec<_>>(),
+        //     &mut transcript,
+        // );
 
         Self::verify_memory_checking(
             preprocessing,

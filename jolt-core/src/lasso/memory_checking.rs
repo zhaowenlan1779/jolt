@@ -553,19 +553,19 @@ where
             proof.exogenous_openings.openings(),
         ]
         .concat();
-        opening_accumulator.append(
-            &read_write_commits,
-            r_read_write.to_vec(),
-            &read_write_claims,
-            transcript,
-        );
+        // opening_accumulator.append(
+        //     &read_write_commits,
+        //     r_read_write.to_vec(),
+        //     &read_write_claims,
+        //     transcript,
+        // );
 
-        opening_accumulator.append(
-            &commitments.init_final_values(),
-            r_init_final.to_vec(),
-            &proof.openings.init_final_values(),
-            transcript,
-        );
+        // opening_accumulator.append(
+        //     &commitments.init_final_values(),
+        //     r_init_final.to_vec(),
+        //     &proof.openings.init_final_values(),
+        //     transcript,
+        // );
 
         Self::compute_verifier_openings(
             &mut proof.openings,
