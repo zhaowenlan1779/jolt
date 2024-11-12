@@ -333,19 +333,19 @@ where
         let mut exogenous_openings = Self::ExogenousOpenings::default();
 
         let eq_read_write = EqPolynomial::evals(r_read_write);
-        polynomials
-            .read_write_values()
-            .par_iter()
-            .zip_eq(openings.read_write_values_mut().into_par_iter())
-            .chain(
-                Self::ExogenousOpenings::exogenous_data(jolt_polynomials)
-                    .par_iter()
-                    .zip_eq(exogenous_openings.openings_mut().into_par_iter()),
-            )
-            .for_each(|(poly, opening)| {
-                let claim = poly.evaluate_at_chi(&eq_read_write);
-                *opening = claim;
-            });
+        // polynomials
+        //     .read_write_values()
+        //     .par_iter()
+        //     .zip_eq(openings.read_write_values_mut().into_par_iter())
+        //     .chain(
+        //         Self::ExogenousOpenings::exogenous_data(jolt_polynomials)
+        //             .par_iter()
+        //             .zip_eq(exogenous_openings.openings_mut().into_par_iter()),
+        //     )
+        //     .for_each(|(poly, opening)| {
+        //         let claim = poly.evaluate_at_chi(&eq_read_write);
+        //         *opening = claim;
+        //     });
 
         let read_write_polys: Vec<_> = [
             polynomials.read_write_values(),
@@ -363,14 +363,14 @@ where
         // );
 
         let eq_init_final = EqPolynomial::evals(r_init_final);
-        polynomials
-            .init_final_values()
-            .par_iter()
-            .zip_eq(openings.init_final_values_mut().into_par_iter())
-            .for_each(|(poly, opening)| {
-                let claim = poly.evaluate_at_chi(&eq_init_final);
-                *opening = claim;
-            });
+        // polynomials
+        //     .init_final_values()
+        //     .par_iter()
+        //     .zip_eq(openings.init_final_values_mut().into_par_iter())
+        //     .for_each(|(poly, opening)| {
+        //         let claim = poly.evaluate_at_chi(&eq_init_final);
+        //         *opening = claim;
+        //     });
 
         // opening_accumulator.append(
         //     &polynomials.init_final_values(),
