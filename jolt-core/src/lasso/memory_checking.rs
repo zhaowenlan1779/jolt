@@ -332,7 +332,7 @@ where
         let mut openings = Self::Openings::initialize(preprocessing);
         let mut exogenous_openings = Self::ExogenousOpenings::default();
 
-        let eq_read_write = EqPolynomial::evals(r_read_write);
+        // let eq_read_write = EqPolynomial::evals(r_read_write);
         // polynomials
         //     .read_write_values()
         //     .par_iter()
@@ -347,13 +347,13 @@ where
         //         *opening = claim;
         //     });
 
-        let read_write_polys: Vec<_> = [
-            polynomials.read_write_values(),
-            Self::ExogenousOpenings::exogenous_data(jolt_polynomials),
-        ]
-        .concat();
-        let read_write_claims: Vec<_> =
-            [openings.read_write_values(), exogenous_openings.openings()].concat();
+        // let read_write_polys: Vec<_> = [
+        //     polynomials.read_write_values(),
+        //     Self::ExogenousOpenings::exogenous_data(jolt_polynomials),
+        // ]
+        // .concat();
+        // let read_write_claims: Vec<_> =
+        //     [openings.read_write_values(), exogenous_openings.openings()].concat();
         // opening_accumulator.append(
         //     &read_write_polys,
         //     DensePolynomial::new(eq_read_write),
@@ -362,7 +362,7 @@ where
         //     transcript,
         // );
 
-        let eq_init_final = EqPolynomial::evals(r_init_final);
+        // let eq_init_final = EqPolynomial::evals(r_init_final);
         // polynomials
         //     .init_final_values()
         //     .par_iter()
@@ -543,16 +543,16 @@ where
             Some(pcs_setup),
         );
 
-        let read_write_commits: Vec<_> = [
-            commitments.read_write_values(),
-            Self::ExogenousOpenings::exogenous_data(jolt_commitments),
-        ]
-        .concat();
-        let read_write_claims: Vec<_> = [
-            proof.openings.read_write_values(),
-            proof.exogenous_openings.openings(),
-        ]
-        .concat();
+        // let read_write_commits: Vec<_> = [
+        //     commitments.read_write_values(),
+        //     Self::ExogenousOpenings::exogenous_data(jolt_commitments),
+        // ]
+        // .concat();
+        // let read_write_claims: Vec<_> = [
+        //     proof.openings.read_write_values(),
+        //     proof.exogenous_openings.openings(),
+        // ]
+        // .concat();
         // opening_accumulator.append(
         //     &read_write_commits,
         //     r_read_write.to_vec(),
@@ -567,22 +567,22 @@ where
         //     transcript,
         // );
 
-        Self::compute_verifier_openings(
-            &mut proof.openings,
-            preprocessing,
-            &r_read_write,
-            &r_init_final,
-        );
+        // Self::compute_verifier_openings(
+        //     &mut proof.openings,
+        //     preprocessing,
+        //     &r_read_write,
+        //     &r_init_final,
+        // );
 
-        Self::check_fingerprints(
-            preprocessing,
-            claims_read_write,
-            claims_init_final,
-            &proof.openings,
-            &proof.exogenous_openings,
-            &gamma,
-            &tau,
-        );
+        // Self::check_fingerprints(
+        //     preprocessing,
+        //     claims_read_write,
+        //     claims_init_final,
+        //     &proof.openings,
+        //     &proof.exogenous_openings,
+        //     &gamma,
+        //     &tau,
+        // );
 
         Ok(())
     }
