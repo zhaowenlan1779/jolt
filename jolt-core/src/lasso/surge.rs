@@ -8,7 +8,7 @@ use crate::{
 };
 use ark_serialize::{CanonicalDeserialize, CanonicalSerialize};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
-use std::marker::{PhantomData, Sync};
+use std::{marker::{PhantomData, Sync}, time::Instant};
 
 use crate::{
     jolt::instruction::JoltInstruction,
@@ -386,7 +386,9 @@ where
         transcript.append_protocol_name(Self::protocol_name());
 
         let num_lookups = ops.len().next_power_of_two();
+        let start = Instant::now();
         let polynomials = Self::generate_witness(preprocessing, &ops);
+        println!("Generate witnesses time: {}", start.elapsed().as_micros());
 
         let mut commitments = SurgeCommitments::<PCS>::initialize(preprocessing);
         let trace_polys = polynomials.read_write_values();
