@@ -436,13 +436,13 @@ where
         // Remove EQ
         let _ = combined_sumcheck_polys.pop();
         let _ = sumcheck_openings.pop();
-        opening_accumulator.append(
-            &polynomials.E_polys.iter().collect::<Vec<_>>(),
-            DensePolynomial::new(EqPolynomial::evals(&r_z)),
-            r_z.clone(),
-            &sumcheck_openings.iter().collect::<Vec<_>>(),
-            &mut transcript,
-        );
+        // opening_accumulator.append(
+        //     &polynomials.E_polys.iter().collect::<Vec<_>>(),
+        //     DensePolynomial::new(EqPolynomial::evals(&r_z)),
+        //     r_z.clone(),
+        //     &sumcheck_openings.iter().collect::<Vec<_>>(),
+        //     &mut transcript,
+        // );
 
         let primary_sumcheck = SurgePrimarySumcheck {
             claimed_evaluation: sumcheck_claim,

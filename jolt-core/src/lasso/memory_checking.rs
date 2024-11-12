@@ -354,13 +354,13 @@ where
         .concat();
         let read_write_claims: Vec<_> =
             [openings.read_write_values(), exogenous_openings.openings()].concat();
-        opening_accumulator.append(
-            &read_write_polys,
-            DensePolynomial::new(eq_read_write),
-            r_read_write.to_vec(),
-            &read_write_claims,
-            transcript,
-        );
+        // opening_accumulator.append(
+        //     &read_write_polys,
+        //     DensePolynomial::new(eq_read_write),
+        //     r_read_write.to_vec(),
+        //     &read_write_claims,
+        //     transcript,
+        // );
 
         let eq_init_final = EqPolynomial::evals(r_init_final);
         polynomials
@@ -372,13 +372,13 @@ where
                 *opening = claim;
             });
 
-        opening_accumulator.append(
-            &polynomials.init_final_values(),
-            DensePolynomial::new(eq_init_final),
-            r_init_final.to_vec(),
-            &openings.init_final_values(),
-            transcript,
-        );
+        // opening_accumulator.append(
+        //     &polynomials.init_final_values(),
+        //     DensePolynomial::new(eq_init_final),
+        //     r_init_final.to_vec(),
+        //     &openings.init_final_values(),
+        //     transcript,
+        // );
 
         (openings, exogenous_openings)
     }
