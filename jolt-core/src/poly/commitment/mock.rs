@@ -14,6 +14,7 @@ use crate::utils::math::Math;
 use super::commitment_scheme::{BatchType, CommitShape, CommitmentScheme};
 use ark_ec::{pairing::Pairing, AffineRepr};
 use ark_ec::VariableBaseMSM;
+use rayon::prelude::*;
 
 #[derive(Clone)]
 pub struct MockCommitScheme<E: Pairing>
@@ -117,7 +118,7 @@ impl<E: Pairing> CommitmentScheme for MockCommitScheme<E>
         prover_param: &Self::Setup,
         _batch_type: BatchType,
     ) -> Vec<Self::Commitment> {
-        evals.iter().map(|eval| Self::commit_slice(eval, prover_param))
+        evals.par_iter().map(|eval| Self::commit_slice(eval, prover_param))
             .collect()
     }
     fn commit_slice(evals: &[Self::Field], prover_param: &Self::Setup) -> Self::Commitment {
