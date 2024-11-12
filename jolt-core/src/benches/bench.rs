@@ -126,7 +126,8 @@ where
         for nv in 20..=24 {
             let num_ops = 1 << nv;
             let preprocessing = SurgePreprocessing::preprocess();
-            let func = |_| {
+            let mut total_time = 0;
+            let mut func = |_| {
                 let mut rng = test_rng();
                 const C: usize = 4;
                 const M: usize = 1 << 16;
@@ -140,24 +141,26 @@ where
                 .take(num_ops)
                 .collect::<Vec<_>>();
 
-                SurgeProof::<F, PCS, XORInstruction<32>, C, M>::prove(
+                let before = Instant::now();
+                let proof = SurgeProof::<F, PCS, XORInstruction<32>, C, M>::prove(
                     &preprocessing,
                     &generators,
                     ops,
-                )
+                );
+                total_time += before.elapsed().as_micros();
+                proof
             };
 
-            let before = Instant::now();
-            (0..10).for_each(|i| {
+            
+            (0..9).for_each(|i| {
                 func(i);
             });
+            let (proof, _) = func(0);
             println!(
                 "prover time for {}: {} us",
                 nv,
-                before.elapsed().as_micros() / 10
+                total_time / 10
             );
-
-            let (proof, _) = func(0);
             println!("Proof sizing for {}:", nv);
             // serialize_and_print_size("jolt_commitments", &jolt_commitments);
             serialize_and_print_size("proof", &proof);
