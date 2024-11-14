@@ -12,7 +12,7 @@ use std::{marker::{PhantomData, Sync}, time::Instant};
 
 use crate::{
     jolt::instruction::JoltInstruction,
-    lasso::memory_checking::{MemoryCheckingProof, MemoryCheckingProver, MemoryCheckingVerifier},
+    lasso::memory_checking_piop::{MemoryCheckingPIOPProof, MemoryCheckingPIOPProver, MemoryCheckingPIOPVerifier},
     poly::{
         commitment::{commitment_scheme::CommitmentScheme, hyrax::matrix_dimensions},
         dense_mlpoly::DensePolynomial,
@@ -94,7 +94,7 @@ impl<T: CanonicalSerialize + CanonicalDeserialize> StructuredPolynomialData<T> f
     }
 }
 
-impl<F, PCS, Instruction, const C: usize, const M: usize> MemoryCheckingProver<F, PCS>
+impl<F, PCS, Instruction, const C: usize, const M: usize> MemoryCheckingPIOPProver<F, PCS>
     for SurgeProof<F, PCS, Instruction, C, M>
 where
     F: JoltField,
@@ -118,13 +118,13 @@ where
         _: &JoltPolynomials<F>,
         gamma: &F,
         tau: &F,
-    ) -> (Vec<Vec<F>>, Vec<Vec<F>>) {
+    ) -> ((Vec<DensePolynomial<F>>, Vec<DensePolynomial<F>>), (Vec<DensePolynomial<F>>, Vec<DensePolynomial<F>>)) {
         let gamma_squared = gamma.square();
         let num_lookups = polynomials.dim[0].len();
 
-        let read_write_leaves = (0..Self::num_memories())
+        let read_write_leaves : (Vec<_>, Vec<_>) = (0..Self::num_memories())
             .into_par_iter()
-            .flat_map_iter(|memory_index| {
+            .map(|memory_index| {
                 let dim_index = Self::memory_to_dimension_index(memory_index);
                 let read_fingerprints: Vec<F> = (0..num_lookups)
                     .map(|i| {
@@ -139,13 +139,13 @@ where
                     .map(|read_fingerprint| *read_fingerprint + gamma_squared)
                     .collect();
 
-                vec![read_fingerprints, write_fingerprints]
+                (DensePolynomial::new(read_fingerprints), DensePolynomial::new(write_fingerprints))
             })
-            .collect();
+            .unzip();
 
-        let init_final_leaves = (0..Self::num_memories())
+        let init_final_leaves : (Vec<_>, Vec<_>) = (0..Self::num_memories())
             .into_par_iter()
-            .flat_map_iter(|memory_index| {
+            .map(|memory_index| {
                 let dim_index = Self::memory_to_dimension_index(memory_index);
                 let subtable_index = Self::memory_to_subtable_index(memory_index);
                 // TODO(moodlezoup): Only need one init polynomial per subtable
@@ -171,9 +171,9 @@ where
                     })
                     .collect();
 
-                vec![init_fingerprints, final_fingerprints]
+                (DensePolynomial::new(init_fingerprints), DensePolynomial::new(final_fingerprints))
             })
-            .collect();
+            .unzip();
 
         (read_write_leaves, init_final_leaves)
     }
@@ -183,7 +183,7 @@ where
     }
 }
 
-impl<F, PCS, Instruction, const C: usize, const M: usize> MemoryCheckingVerifier<F, PCS>
+impl<F, PCS, Instruction, const C: usize, const M: usize> MemoryCheckingPIOPVerifier<F, PCS>
     for SurgeProof<F, PCS, Instruction, C, M>
 where
     F: JoltField,
@@ -313,7 +313,7 @@ where
     /// Primary collation sumcheck proof
     primary_sumcheck: SurgePrimarySumcheck<F>,
 
-    memory_checking: MemoryCheckingProof<F, PCS, SurgeOpenings<F>, NoExogenousOpenings>,
+    memory_checking: MemoryCheckingPIOPProof<F, PCS, SurgeOpenings<F>, NoExogenousOpenings>,
 }
 
 impl<F, Instruction, const C: usize, const M: usize> SurgePreprocessing<F, Instruction, C, M>
